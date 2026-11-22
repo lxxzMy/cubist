@@ -310,9 +310,10 @@ class D3DStereoWindow:
                          WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                          WS_EX_APPWINDOW | WS_EX_LAYERED)
             return
-        # 【颜色键】见 __init__：alpha=255 + LWA_COLORKEY → 视觉全不透明，
-        # 但分层窗口仍必须由 DWM 合成（无法走 MPO 独立翻转）→ 无撕裂。
-        # logs/alpha255.on：A/B 用（回到纯 255 不透明平面，验证是否复现撕裂）。
+        # 默认：LWA_ALPHA=254。alpha=255 会被 DWM 当成不透明平面 → 提升为
+        # 独立翻转/MPO 直扫我们的 flip 缓冲 → 运动时滚动横缝（撕裂）。
+        # 254 强制 DWM 真合成，0.4% 透明肉眼不可见。
+        # _SYNC1 / _COLORKEY 只是 A/B 实验开关（默认关，见 __init__）。
         if _SYNC1:
             _user32.SetLayeredWindowAttributes(
                 ctypes.c_void_p(self.hwnd), 0, 255, 0x2)       # 不透明
@@ -322,7 +323,7 @@ class D3DStereoWindow:
                 ctypes.c_void_p(self.hwnd), _COLORKEY, 0, 0x1)  # 颜色键
             return
         _user32.SetLayeredWindowAttributes(
-            ctypes.c_void_p(self.hwnd), _COLORKEY, 0, 0x1)     # LWA_COLORKEY
+            ctypes.c_void_p(self.hwnd), 0, 254, 0x2)          # LWA_ALPHA=254
 
     def _hide_from_taskbar(self):
         _set_exstyle(self.hwnd, WS_EX_TOOLWINDOW, WS_EX_APPWINDOW)
