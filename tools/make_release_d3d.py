@@ -1,21 +1,22 @@
 # -*- coding: utf-8 -*-
-"""构建便携发布包（当前默认 Cubist-1.2-d3d，纯 D3D12 主路径）。
+"""构建便携发布包（当前默认 Cubist-1.5-d3d，纯 D3D12 主路径）。
 
 流程：
-  1. 源包（默认 release/Cubist-1.1-d3d）→ 目标包（默认 Cubist-1.2-d3d）
-     全量复制；剔除用户残留：settings.yaml.bak*、logs 内容
-  2. 调 package_shim（全量重编 app/**/*.pyc + runtime DLL：shim v2 /
+  1. 准备包目录：默认**就地重建**（--dst 指定的包即基线）；
+     也可 --src 从另一份包复制出新包（做新版本时才用）
+  2. 剔除用户残留：settings.yaml.bak*、logs 内容
+  3. 调 package_shim（全量重编 app/**/*.pyc + runtime DLL：shim v2 /
      d3drender.dll / dxcompiler+dxil），并清理孤儿 pyc
-  3. 补资源：app/data/rootsig.blob（D3D12 模块的 blob 缓存）
-  4. 版本单源：NOTICE.txt 头
-  5. csc 重编 立体派.exe
-  6. 自检：pyc/DLL 清单、启动器、settings 默认
+  4. 补资源：app/data/rootsig.blob（D3D12 模块的 blob 缓存）
+  5. 版本单源：NOTICE.txt 头
+  6. csc 重编 立体派.exe
+  7. 自检：pyc/DLL 清单、启动器、settings 默认
 
 用法：
-    python tools/make_release_d3d.py            # 全流程（1.1-d3d → 1.2-d3d）
+    python tools/make_release_d3d.py            # 就地重建 1.5-d3d
     python tools/make_release_d3d.py --check    # 只自检现有包
-    python tools/make_release_d3d.py --src release/Cubist-1.1-d3d \
-        --dst release/Cubist-1.2-d3d --version "立体派 Cubist 1.2-d3d"
+    python tools/make_release_d3d.py --src release/Cubist-1.5-d3d \
+        --dst release/Cubist-1.6-d3d --version "立体派 Cubist 1.6-d3d"
 """
 import argparse
 import glob
@@ -25,10 +26,10 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC = os.path.join(ROOT, "release", "Cubist-1.1-d3d")
-DST = os.path.join(ROOT, "release", "Cubist-1.2-d3d")
+SRC = None                    # None = 就地（以 DST 为基线）
+DST = os.path.join(ROOT, "release", "Cubist-1.5-d3d")
 D2S = os.path.join(ROOT, "D2S")
-VERSION_LINE = "立体派 Cubist 1.2-d3d"
+VERSION_LINE = "立体派 Cubist 1.5-d3d"
 
 _SKIP_BAK = ("settings.yaml.bak",)
 
@@ -38,6 +39,12 @@ def _log(msg):
 
 
 def prepare_tree():
+    if SRC is None or os.path.normcase(os.path.abspath(SRC)) == \
+            os.path.normcase(os.path.abspath(DST)):
+        if not os.path.isdir(DST):
+            raise SystemExit(f"[x] 包不存在（就地重建需要先有一份基线）: {DST}")
+        _log(f"[1] 就地重建 {os.path.relpath(DST, ROOT)}")
+        return
     if not os.path.isdir(SRC):
         raise SystemExit(f"[x] 源包不存在: {SRC}")
     if os.path.isdir(DST):
@@ -165,8 +172,10 @@ def main():
     global SRC, DST, VERSION_LINE
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true", help="只自检现有包")
-    ap.add_argument("--src", default=None, help="源包目录（默认 1.1-d3d）")
-    ap.add_argument("--dst", default=None, help="目标包目录（默认 1.2-d3d）")
+    ap.add_argument("--src", default=None,
+                    help="源包目录（默认省略=就地重建 --dst）")
+    ap.add_argument("--dst", default=None,
+                    help="目标包目录（默认 1.5-d3d）")
     ap.add_argument("--version", default=None, help="版本行（NOTICE 首行）")
     a = ap.parse_args()
     if a.src:
