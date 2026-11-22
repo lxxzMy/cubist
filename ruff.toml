@@ -1,0 +1,8 @@
+# 保守起步：只开"真错误"级（语法/未定义名/重定义）。F401/F841 等风格项
+# 待门禁覆盖增强后再分级启用。--fix 不默认使用。
+line-length = 120
+target-version = "py312"
+extend-exclude = ["tools/apitrace"]   # 第三方 vendored 工具
+
+[lint]
+select = ["E9", "F821", "F811", "E722"]

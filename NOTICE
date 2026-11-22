@@ -1,0 +1,52 @@
+Cubist (立体派)
+Copyright 2026 lxxzMy
+
+This product includes software developed by third parties. The notices below
+are provided in accordance with their licenses.
+
+--------------------------------------------------------------------------------
+1. Desktop2Stereo (MIT)
+--------------------------------------------------------------------------------
+The D2S application source is derived from Desktop2Stereo.
+
+    MIT License
+    Copyright (c) 2026 LC700X
+
+The full MIT text is retained in D2S/LICENSE and applies to the derived
+portions of the D2S directory.
+
+--------------------------------------------------------------------------------
+2. ONNX Runtime / DirectML (Microsoft)
+--------------------------------------------------------------------------------
+Inference is performed through ONNX Runtime with the DirectML execution
+provider. ONNX Runtime is licensed under the MIT License.
+DirectML is a Microsoft redistributable component governed by its own terms.
+Neither is distributed in this repository; users obtain them separately.
+
+--------------------------------------------------------------------------------
+3. Windows SDK / DirectX headers, D3DCompiler, DXCompiler
+--------------------------------------------------------------------------------
+`_toolchain/src` builds against the Microsoft Windows SDK (Direct3D 12, DXGI,
+D3DCompiler, DComp). These are system/redistributable components of Windows and
+are not distributed in this repository.
+
+--------------------------------------------------------------------------------
+4. Python and Python packages
+--------------------------------------------------------------------------------
+The application is written in Python. CPython is licensed under the PSF License.
+Third-party Python packages used at runtime (NumPy, OpenCV, Pillow, PyYAML,
+requests, pywin32, mss, and optionally moderngl/glfw/PyOpenGL) are licensed by
+their respective authors; see D2S/requirements.txt for the list.
+
+--------------------------------------------------------------------------------
+5. NVIDIA CUDA / cuDNN / TensorRT (optional, not distributed)
+--------------------------------------------------------------------------------
+Optional accelerated backends are installed by the user from NVIDIA and are
+governed by the NVIDIA Software License Agreement. They are not distributed in
+this repository.
+
+--------------------------------------------------------------------------------
+6. Depth model
+--------------------------------------------------------------------------------
+The monocular depth model (depth-224.onnx) is NOT distributed in this repository.
+Its license has not been finalized; it must be obtained separately.

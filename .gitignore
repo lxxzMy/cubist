@@ -1,0 +1,53 @@
+# ---- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.venv*/
+venv/
+
+# ---- 运行期/打包产物（不在仓库内分发） ------------------------------------
+release/
+runtime/
+D2S/python3/
+D2S/models/
+D2S/logs/
+D2S/controllers/
+D2S/xr_viewer/environments/
+D2S/xr_viewer/controllers/
+dist/
+_dml/
+_toolchain/dl/
+*.onnx
+*.trt
+*.engine
+
+# ---- 原生构建产物 ---------------------------------------------------------
+*.obj
+*.exp
+*.lib
+*.dll
+*.pdb
+*.ilk
+*.res
+
+# ---- 本机状态 / 调试转储 --------------------------------------------------
+*.log
+*.pid
+*.bak
+*.tmp
+*.corrupt-*
+settings.yaml.bak*
+_debug_frames/
+_fdump*/
+_dump/
+_rdump*/
+_refactor_baseline/
+_frame_dump/
+*.npy
+
+# ---- 系统/编辑器 ----------------------------------------------------------
+Thumbs.db
+desktop.ini
+.DS_Store
+.idea/
+.vscode/

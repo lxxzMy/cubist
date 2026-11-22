@@ -1,0 +1,224 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "立体派 Cubist · 2D→3D 实时流水线",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1068,
+      495
+    ]
+  },
+  "stages": [
+    {
+      "label": "采集"
+    },
+    {
+      "label": "帧内估计"
+    },
+    {
+      "label": "运动场与判切"
+    },
+    {
+      "label": "时域平滑"
+    },
+    {
+      "label": "立体输出"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "dda",
+      "type": "external",
+      "label": "桌面采集",
+      "sublabel": "DesktopDuplication",
+      "tag": "3 槽零拷贝环",
+      "stage": 0,
+      "row": 2,
+      "width": 120
+    },
+    {
+      "id": "match",
+      "type": "backend",
+      "label": "块匹配",
+      "sublabel": "112² 亮度 · 4×4 ±4",
+      "tag": "SAD + 次优",
+      "stage": 1,
+      "row": 0,
+      "width": 130
+    },
+    {
+      "id": "infer",
+      "type": "backend",
+      "label": "深度推理",
+      "sublabel": "224² 预处理 · TRT/DML",
+      "tag": "GPU ≈4ms",
+      "stage": 1,
+      "row": 2,
+      "width": 140
+    },
+    {
+      "id": "trust",
+      "type": "security",
+      "label": "判切信号",
+      "sublabel": "trust<0.60 ⇒ 切",
+      "tag": "唯一判据",
+      "stage": 2,
+      "row": 0,
+      "width": 120
+    },
+    {
+      "id": "flood",
+      "type": "backend",
+      "label": "深度屏障泛洪",
+      "sublabel": "×12 ping-pong",
+      "tag": "同深度继承",
+      "stage": 2,
+      "row": 1,
+      "width": 125
+    },
+    {
+      "id": "pp",
+      "type": "database",
+      "label": "后处理 + MC-EMA",
+      "sublabel": "闭运算·限幅·AA → 时域",
+      "tag": "τ=80ms · α≈0.19",
+      "stage": 3,
+      "row": 1,
+      "width": 165
+    },
+    {
+      "id": "dibr",
+      "type": "backend",
+      "label": "DIBR 立体合成",
+      "sublabel": "Interleaved / SBS / TAB",
+      "tag": "swap + 每帧置顶",
+      "stage": 4,
+      "row": 2,
+      "width": 150
+    }
+  ],
+  "flows": [
+    {
+      "from": "dda",
+      "to": "infer",
+      "label": "桌面帧",
+      "classification": "60fps",
+      "variant": "emphasis",
+      "labelAt": [
+        203,
+        352
+      ]
+    },
+    {
+      "from": "dda",
+      "to": "match",
+      "label": "同帧颜色",
+      "classification": "112² 亮度乒乓",
+      "fromSide": "top",
+      "via": [
+        [
+          100,
+          157
+        ]
+      ]
+    },
+    {
+      "from": "match",
+      "to": "trust",
+      "label": "SAD · uniq"
+    },
+    {
+      "from": "match",
+      "to": "flood",
+      "label": "匹配种子",
+      "classification": "+ 块中位深度屏障",
+      "fromSide": "bottom",
+      "via": [
+        [
+          315,
+          271
+        ]
+      ]
+    },
+    {
+      "from": "infer",
+      "to": "pp",
+      "label": "raw 深度 · lo/hi",
+      "classification": "P0.5–P99.5 分位",
+      "variant": "emphasis",
+      "toSide": "bottom",
+      "fromSide": "right",
+      "via": [
+        [
+          745,
+          385
+        ]
+      ]
+    },
+    {
+      "from": "trust",
+      "to": "pp",
+      "label": "cut ⇒ α=1",
+      "classification": "整幅直通",
+      "variant": "security",
+      "toSide": "top",
+      "fromSide": "right",
+      "via": [
+        [
+          745,
+          157
+        ]
+      ]
+    },
+    {
+      "from": "flood",
+      "to": "pp",
+      "label": "运动场",
+      "classification": "du,dv"
+    },
+    {
+      "from": "pp",
+      "to": "dibr",
+      "label": "depth_tex",
+      "variant": "emphasis"
+    },
+    {
+      "from": "dda",
+      "to": "dibr",
+      "label": "color_tex 原图",
+      "classification": "原图不被修改",
+      "route": "bottom-channel"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "延迟预算（60fps）",
+      "items": [
+        "全链 ≈6ms：推理 ≈4ms + MC/后处理 <1ms + 渲染 <1ms",
+        "颜色零拷贝：D3D11 环纹理直通 GL，免每帧 33MB CPU 往返",
+        "Present 对齐 + 每帧置顶（SetWindowPos），与 DWM 60Hz 赛跑"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "时域策略（MC-EMA）",
+      "items": [
+        "τ=80ms（α≈0.19，N≈4.8 帧 @60Hz）",
+        "切镜头：trust<0.60 ⇒ α=1，新深度图直接成为真值",
+        "局部暴露阀：|z−old|>0.3 单像素重置；收敛面 P50 自动跟踪"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "运动补偿",
+      "items": [
+        "pred = state(u−du, v−dv)：静止物体的历史状态随运动搬运",
+        "块匹配 4×4 块 ±4 搜索；conf≤0.005 完美匹配直通",
+        "失败块按深度屏障泛洪，继承同深度侧邻居的中位运动"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0F172A" /><stop offset="100%" stop-color="#1E1B4B" />
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="4" result="blur" /><feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
+    </filter>
+    <filter id="eyeGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" /><feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
+    </filter>
+    <linearGradient id="cubeTop" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#38BDF8" /><stop offset="100%" stop-color="#818CF8" /></linearGradient>
+    <linearGradient id="cubeLeft" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#4F46E5" /><stop offset="100%" stop-color="#1E1B4B" /></linearGradient>
+    <linearGradient id="cubeRight" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#818CF8" /><stop offset="100%" stop-color="#312E81" /></linearGradient>
+    <linearGradient id="squareFill" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#1E293B" /><stop offset="100%" stop-color="#0F172A" /></linearGradient>
+    <linearGradient id="scanGrad" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#38BDF8" stop-opacity="0.8" /><stop offset="100%" stop-color="#38BDF8" stop-opacity="0" /></linearGradient>
+    <pattern id="dots" x="0" y="0" width="16" height="16" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1.5" fill="#38BDF8" fill-opacity="0.08" /></pattern>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="url(#bgGradient)" />
+  <rect width="256" height="256" rx="56" fill="url(#dots)" />
+  <path d="M 32 128 C 64 64, 192 64, 224 128 C 192 192, 64 192, 32 128 Z" fill="none" stroke="#38BDF8" stroke-width="4" stroke-linecap="round" filter="url(#eyeGlow)" opacity="0.9" />
+  <g id="layer-2d">
+    <rect x="48" y="104" width="48" height="48" rx="8" fill="url(#squareFill)" stroke="#38BDF8" stroke-width="2.5" stroke-dasharray="6 4" />
+    <line x1="72" y1="104" x2="72" y2="152" stroke="#38BDF8" stroke-width="1" stroke-opacity="0.2" />
+    <line x1="48" y1="128" x2="96" y2="128" stroke="#38BDF8" stroke-width="1" stroke-opacity="0.2" />
+    <path d="M 56 128 Q 72 112 88 128 Q 72 144 56 128 Z" fill="#38BDF8" fill-opacity="0.8" />
+    <circle cx="72" cy="128" r="4" fill="#0F172A" />
+  </g>
+  <g id="transition">
+    <path d="M 100 128 L 106 128" stroke="#38BDF8" stroke-width="3" stroke-linecap="round" filter="url(#glow)" />
+    <path d="M 102 124 L 108 128 L 102 132" fill="none" stroke="#38BDF8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+    <circle cx="102" cy="118" r="1.5" fill="#818CF8" opacity="0.8" /><circle cx="102" cy="138" r="1.5" fill="#818CF8" opacity="0.8" />
+    <circle cx="106" cy="114" r="1" fill="#38BDF8" opacity="0.6" /><circle cx="106" cy="142" r="1" fill="#38BDF8" opacity="0.6" />
+    <rect x="96" y="104" width="8" height="48" fill="url(#scanGrad)" opacity="0.5" />
+  </g>
+  <g id="layer-3d">
+    <polygon points="160,64 208,88 160,112 112,88" fill="url(#cubeTop)" />
+    <polygon points="112,88 160,112 160,160 112,136" fill="url(#cubeLeft)" />
+    <polygon points="160,112 208,88 208,136 160,160" fill="url(#cubeRight)" />
+    <path d="M 160 64 L 208 88 L 208 136 L 160 160 L 112 136 L 112 88 Z" fill="none" stroke="#38BDF8" stroke-width="2" stroke-linejoin="round" filter="url(#glow)" />
+    <path d="M 112 88 L 160 112 L 208 88" fill="none" stroke="#38BDF8" stroke-width="2" stroke-linejoin="round" />
+    <path d="M 160 112 L 160 160" fill="none" stroke="#38BDF8" stroke-width="2" stroke-linejoin="round" />
+    <ellipse cx="160" cy="128" rx="72" ry="24" fill="none" stroke="#818CF8" stroke-width="1.5" stroke-dasharray="4 8" transform="rotate(-20 160 128)" opacity="0.6" />
+    <ellipse cx="160" cy="128" rx="84" ry="32" fill="none" stroke="#38BDF8" stroke-width="1" stroke-dasharray="2 6" transform="rotate(25 160 128)" opacity="0.4" />
+  </g>
+  <g id="decorations">
+    <circle cx="220" cy="80" r="2" fill="#38BDF8" filter="url(#glow)" opacity="0.8" /><circle cx="200" cy="56" r="1.5" fill="#818CF8" opacity="0.6" />
+    <circle cx="236" cy="120" r="1.5" fill="#38BDF8" opacity="0.5" /><circle cx="120" cy="56" r="1" fill="#38BDF8" opacity="0.4" />
+    <circle cx="180" cy="184" r="1.5" fill="#818CF8" opacity="0.6" /><circle cx="144" cy="192" r="1" fill="#38BDF8" opacity="0.5" />
+    <circle cx="36" cy="120" r="1.5" fill="#38BDF8" opacity="0.4" /><circle cx="48" cy="88" r="1" fill="#818CF8" opacity="0.5" />
+  </g>
+</svg>
