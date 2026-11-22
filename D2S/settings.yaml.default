@@ -1,6 +1,8 @@
 Fullscreen Output: true
 Capture Mode: Monitor
 Monitor Index: 1
+# 采集屏（AB 分离）：省略/留空 = 同输出屏；须与输出屏同一块显卡（零拷贝）
+Capture Monitor Index: 1
 Window Title: ''
 Show FPS: true
 Model List:
