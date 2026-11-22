@@ -46,7 +46,29 @@ governed by the NVIDIA Software License Agreement. They are not distributed in
 this repository.
 
 --------------------------------------------------------------------------------
-6. Depth model
+6. Depth model — DepthART (CC BY-NC 4.0, non-commercial)
 --------------------------------------------------------------------------------
-The monocular depth model (depth-224.onnx) is NOT distributed in this repository.
-Its license has not been finalized; it must be obtained separately.
+models/depth-224.onnx is an ONNX export of the DepthART "MobileNetV4-M-slim-SPF"
+(224 input) checkpoint, used for monocular depth inference.
+
+  DepthART: "DepthART: Depth Anything Rethought for Tiny Models"
+    Copyright (c) 2026 DepthART Authors
+    https://github.com/xuefeng-cvr/DepthART
+    https://huggingface.co/Fengxue93/DepthART
+    Original file: onnx/relative_mnv4m_slim_spf_224_default.onnx
+
+  DepthART's own materials are CC BY 4.0, but its checkpoints were trained using
+  supervision generated with Depth Anything V2-Large, whose weights are
+  distributed under CC BY-NC 4.0, and are explicitly not covered by the
+  DepthART CC BY 4.0 grant.
+
+  Accordingly, this model is distributed under the Creative Commons
+  Attribution-NonCommercial 4.0 International License (CC BY-NC 4.0):
+    https://creativecommons.org/licenses/by-nc/4.0/
+  Full legal text: models/LICENSE-CC-BY-NC-4.0.txt
+  Attribution and modification notice: models/README.md
+
+  COMMERCIAL USE IS PROHIBITED for this model. Redistribution of this
+  repository together with the model is a non-commercial distribution.
+  The Apache-2.0 license of the source code does not apply to this model file.
+
