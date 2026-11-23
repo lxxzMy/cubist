@@ -132,7 +132,7 @@ import _stdio
 _stdio.ensure()
 
 from utils import (FULLSCREEN_OUTPUT, OS_NAME, OUTPUT_RESOLUTION, DISPLAY_MODE, MONITOR_INDEX, SHOW_FPS, XR_PREVIEW_WINDOW, CROP_MODE, FPS, WINDOW_TITLE, CONVERGENCE, RUN_MODE, LOSSLESS_SCALING_SUPPORT, USE_3D_MONITOR, FILL_16_9, FIX_VIEWER_ASPECT, CAPTURE_MODE, STEREO_DISPLAY_SELECTION, STEREO_DISPLAY_INDEX, shutdown_event, CONTROLLER_MODEL, ENVIRONMENT_MODEL, VSYNC, INTERLEAVE_PHASE, PARALLAX_PX, PARALLAX_CURVE, DEPTH_UPSAMPLER, AA_STRENGTH, DIBR_EDGE_SNAP, DEPTH_RELIEF, DIBR_WARP_ITERATIONS, DISOCLUSION_FILL, CURSOR_MODE, SAME_SCREEN, CAPTURE_MONITOR_INDEX,
-DEPTH_GROW)
+DEPTH_GROW, DEPTH_MAP_STAGE)
 from depth import process
 import depth as _depth_mod   # 深度 EMA/参数的运行时热改入口
 
@@ -1193,7 +1193,8 @@ def _main_d3d(mode="Viewer"):
         cursor_overlay=(CURSOR_MODE == "overlay"),
         show_fps=bool(SHOW_FPS),
         frame_size=(_w, _h), vsync=bool(VSYNC), same_screen=SAME_SCREEN,
-        depth_res=_model_size(), prep_normalize=_prep_normalize())
+        depth_res=_model_size(), prep_normalize=_prep_normalize(),
+        depth_map_stage=DEPTH_MAP_STAGE)
     window.set_title(WINDOW_TITLE)   # 与 GL 路径同标题（托盘守护按标题找窗口）
     # 采集屏/输出屏（AB 分离）：window.output_index 始终是"DDA 采集输出
     # 序号"，这里按 CAPTURE_MONITOR_INDEX 解析（不同卡 → 弹框 + 回退）。
@@ -2393,6 +2394,12 @@ def _main_d3d(mode="Viewer"):
                             try:
                                 _depth_mod.AA_STRENGTH = \
                                     2.0 * float(_req["Anti-aliasing"])
+                            except Exception:
+                                pass
+                        if "Depth Map Stage" in _req:
+                            # 深度图逐级查看（raw/norm/aa/final），实时生效
+                            try:
+                                window.set_depth_map_stage(_req["Depth Map Stage"])
                             except Exception:
                                 pass
                         window.apply_live_params(_req)

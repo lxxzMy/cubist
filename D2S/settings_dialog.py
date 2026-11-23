@@ -246,7 +246,7 @@ _EDID_CACHE = [None]
 
 LIVE_KEYS = ("Parallax (px)", "Convergence Bias",
              "Anti-aliasing",
-             "Show FPS", "VSync", "Interleave Phase")
+             "Show FPS", "VSync", "Interleave Phase", "Depth Map Stage")
 
 BG = "#0B1220"
 CARD = "#141E30"
@@ -752,6 +752,26 @@ class SettingsDialog(tk.Tk):
                                        _mi, self._pick_model, width=280)
             self._model_dd.grid(row=r, column=1, sticky="e", padx=(12, 0))
 
+        # 深度图阶段（输出格式 = Depth Map 时有效）：逐级查看链上哪一张。
+        # 实时生效（LIVE_KEYS），不用重启——方便一帧帧对细节。
+        self._dm_stages = [("归一化后（重标定）", "Norm"),
+                           ("原始（模型输出）", "Raw"),
+                           ("平滑后（高斯 AA）", "AA"),
+                           ("最终（EMA，3D 实际用的）", "Final")]
+        self._vars["Depth Map Stage"] = tk.StringVar(value="Norm")
+        try:
+            import utils as _u_s
+            _cur_s = str(_u_s.settings.get("Depth Map Stage", "Norm") or "Norm")
+        except Exception:
+            _cur_s = "Norm"
+        _si = next((i for i, (_l, v) in enumerate(self._dm_stages)
+                    if v.lower() == _cur_s.strip().lower()), 0)
+        self._vars["Depth Map Stage"].set(self._dm_stages[_si][1])
+        r = self._row(c4, "深度图阶段")
+        self._dm_dd = _Dropdown(c4, [_l for _l, _v in self._dm_stages], _si,
+                                self._pick_dm_stage, width=280)
+        self._dm_dd.grid(row=r, column=1, sticky="e", padx=(12, 0))
+
         # 推理显卡：仅 GL 回退/离线工具有意义（DML 零拷贝跨卡会退读回）。
         # D3D 主路径固定"跟随采集屏所在卡"（adapter.pick 自动匹配），
         # 不再暴露手动选卡——选了也没用，只会误导。
@@ -964,6 +984,12 @@ class SettingsDialog(tk.Tk):
     def _pick_model(self, i):
         try:
             self._vars["Depth Model"].set(self._models[i][0])
+        except Exception:
+            pass
+
+    def _pick_dm_stage(self, i):
+        try:
+            self._vars["Depth Map Stage"].set(self._dm_stages[i][1])
         except Exception:
             pass
 
@@ -1251,6 +1277,14 @@ class SettingsDialog(tk.Tk):
                 if _k == _cm:
                     self._model_dd._idx = i
                     self._model_dd._paint()
+                    break
+        # 深度图阶段下拉对齐 yaml 当前值
+        if getattr(self, "_dm_dd", None) is not None:
+            _cs = str(self._vars["Depth Map Stage"].get()).strip().lower()
+            for i, (_l, v) in enumerate(self._dm_stages):
+                if v.lower() == _cs:
+                    self._dm_dd._idx = i
+                    self._dm_dd._paint()
                     break
         self._sync_capture_choices()   # 采集屏下拉跟随输出屏（同卡过滤）
 

@@ -2,8 +2,8 @@
 """D3D12 深度后处理链（迁移 R2）：depth_post.DepthPost.spatial_chain 的
 D3D12 移植，宿主 = d3drender.D3DRenderer（d3drender.dll 生产后端）。
 
-pass 序列与 GL 版逐式对应（归一化+dilate → 闭运算 → 坡度限幅 → 分离高斯 →
-EMA/中值），公式零改动（HLSL 移植见 gpu/hlsl_depth.py）。
+pass 序列与 GL 版逐式对应（[可选 dilate] → 归一化 → 分离高斯 → EMA/中值），
+公式零改动（HLSL 移植见 gpu/hlsl_depth.py）。
 状态跟踪/屏障由 Tex.transition 显式管理（RENDER_TARGET/COPY_* 写状态不
 可从 COMMON 提升；ECL 边界自动 decay 回 COMMON）。
 
@@ -22,9 +22,9 @@ from .hlsl import compile_shader, FULLSCREEN_VS
 class D3DDepthPost:
     """D3D12 深度后处理链（宿主 = D3DRenderer）。
 
-    纹理组（R32F res×res）：raw(输入) / dil(归一化输出，名字沿用) /
-    sl[2]（gauss ping-pong）/ ema(时域状态) / depth(最终输出) /
-    med_ring[4]（中值模式）。
+    纹理组（R32F res×res）：raw(输入) / dil(可选膨胀 / 高斯水平通) /
+    nrm(归一化输出，专用的——stage_norm 指向它) / aa(高斯垂直通输出，
+    stage_aa 指向它) / ema(时域状态) / depth(最终输出) / med_ring[4]（中值模式）。
     cbuffer 打包见 gpu/hlsl_depth.pack_consts（同布局）。
     """
 
@@ -41,8 +41,10 @@ class D3DDepthPost:
                                     renderable=True)
         self.raw = ren.create_tex(self.res_w, self.res_h, FMT_R32F,
                                   renderable=True)
-        self.dil = mk()
-        self.sl = [mk(), mk()]
+        self.dil = mk()          # 膨胀输出 / 高斯水平通的暂存
+        self.nrm = mk()          # 归一化（重标定）后的深度——专用纹理，后面
+                                 # 的高斯不再写它（Depth Map 阶段视图要看它）
+        self.aa = mk()           # 高斯 AA 平滑后的深度（stage_aa 指向它）
         self.ema = mk()
         self.depth = mk()
         self.med_ring = [mk() for _ in range(4)]
@@ -54,6 +56,10 @@ class D3DDepthPost:
         self.disp_depth = [mk(), mk()]
         self._disp_i = 0
         self.last_disp_depth = self.disp_depth[0]
+        # 阶段视图（Depth Map 模式逐级查看）：归一化后 / AA 平滑后的深度；
+        # 链内每帧更新（首帧之前是空纹理）。
+        self.stage_norm = self.nrm
+        self.stage_aa = self.nrm
         # raw 输入上传 buffer：双缓冲 + 每缓冲"上次被 GPU 读完"的 fence 值。
         # 去掉 wait 之后，下一帧 memmove 不能踩还在被 GPU 读的那一张。
         self._pitch = dr.row_pitch(self.res_w, 4)
@@ -170,10 +176,10 @@ class D3DDepthPost:
                        self._cb(res, 0.0, 1.0, float(min(6, int(grow)))))
             src = self.dil
 
-        # 2) 区间归一化（生产：lo/hi 读 stats t7；只映射）
-        #    目标不能与 src 同一张：膨胀开着时 src=dil → 归一化写 sl[0]；
-        #    关着时 src=raw → 写 dil（名字沿用：现在放的是归一化后的深度）
-        cur = self.sl[0] if src is self.dil else self.dil
+        # 2) 区间归一化（生产：lo/hi 读 stats t7；只映射）→ 专用纹理 nrm。
+        #    不能写进 dil/sl：后面的高斯 ping-pong 会覆盖它们，而 Depth Map
+        #    的"归一化后"阶段视图要看这张。
+        cur = self.nrm
         if stats is not None:
             self._pass("norm_stats", NORM_STATS_FS, cur, [src],
                        self._cb(res, range_lo=stats.band_lo,
@@ -181,20 +187,20 @@ class D3DDepthPost:
         else:
             self._pass("norm", NORM_FS, cur, [src],
                        self._cb(res, lo, hi))
+        self.stage_norm = cur          # 阶段视图：归一化（重标定）后的深度
 
         # 3) 分离高斯 h/v（各向异性：水平 σ=AA / 垂直 ×2/3 —— 2026-11-20 定案）
+        #    nrm → dil（水平）→ aa（垂直）
         aa = aa_texels
         aa_y = (aa * (2.0 / 3.0)) if aa_v is None else float(aa_v)
         if aa and aa > 0.0:
-            cands = (self.dil, self.sl[0], self.sl[1])
-            gh = next(f for f in cands if f is not cur)
-            self._pass("gauss_h", GAUSS_FS, gh, [cur],
+            self._pass("gauss_h", GAUSS_FS, self.dil, [cur],
                        self._cb(res, aa=aa, sigma=aa, dirx=1.0, diry=0.0))
-            gv = next(f for f in cands if f is not gh)
-            self._pass("gauss_v", GAUSS_FS, gv, [gh],
+            self._pass("gauss_v", GAUSS_FS, self.aa, [self.dil],
                        self._cb(res, aa=aa_y,
                                 sigma=aa_y, dirx=0.0, diry=1.0))
-            cur = gv
+            cur = self.aa
+        self.stage_aa = cur            # 阶段视图：AA 平滑后的深度（aa=0 时=norm）
 
         # 4) 时域 EMA / 中值 W5（EMA/中值 pass 随主链同一列表录制——列表
         # 在 submit+wait 后才可 begin_frame 复用，顺序不可颠倒）

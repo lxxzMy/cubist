@@ -57,6 +57,37 @@ _MODE_MAP = {
     "Passthrough": "passthrough", "Depth Map": "depth_map",
 }
 
+# Depth Map 模式显示链上哪一级（设置 "Depth Map Stage" / 面板「深度图阶段」）
+_DM_STAGES = {
+    "raw": "raw", "原始": "raw",
+    "norm": "norm", "normalized": "norm", "normalize": "norm",
+    "归一化": "norm", "重标定": "norm",
+    "aa": "aa", "smooth": "aa", "gauss": "aa", "平滑": "aa",
+    "final": "final", "ema": "final", "depth": "final", "最终": "final",
+}
+
+
+def _norm_dm_stage(s):
+    """阶段设置值（英/中）→ raw/norm/aa/final（缺省 norm）。"""
+    return _DM_STAGES.get(str(s or "norm").strip().lower(), "norm")
+
+
+def dm_stage_tex(post, stage, final_tex=None):
+    """Depth Map 模式要显示的 (深度纹理, 是否需要按 stats 归一化显示)。
+
+    raw：模型原始深度（值域随模型，要按本帧 P2/P98 归一化才能上色）；
+    norm/aa/final：已经是 [0.02,0.98] 显示域，直接 saturate 显示。
+    final_tex：流水线模式下与颜色同帧的 disp_depth；None = post.depth。
+    """
+    st = _norm_dm_stage(stage)
+    if st == "raw":
+        return post.raw, True
+    if st == "norm":
+        return post.stage_norm, False
+    if st == "aa":
+        return post.stage_aa, False
+    return (post.depth if final_tex is None else final_tex), False
+
 
 def _screen_size():
     return (int(_user32.GetSystemMetrics(0)), int(_user32.GetSystemMetrics(1)))
@@ -100,8 +131,10 @@ class D3DStereoWindow:
                  feather_enabled=False, cursor_overlay=False, show_fps=False,
                  frame_size=(1280, 720), vsync=False, fix_aspect=False,
                  specify_display=False, same_screen=True, depth_res=224,
-                 prep_normalize=True, **_kw):
+                 prep_normalize=True, depth_map_stage="Norm", **_kw):
         from utils import VERSION  # noqa: F401  （导入期健康检查）
+        # Depth Map 模式显示哪一级（raw/norm/aa/final；默认归一化后）
+        self.depth_map_stage = _norm_dm_stage(depth_map_stage)
         # 深度模型输入尺寸：int = 方形；(w, h) = 非方形（16:9 宽屏模型）。
         # prep flat 几何、DML shim、深度链、GPU 判据全部按它建；必须与
         # settings 的 Depth Model/Resolution 一致
@@ -502,11 +535,14 @@ class D3DStereoWindow:
 
         depth_tex：流水线模式下传入与颜色同帧的那张显示深度（post 的
         disp_depth 乒乓）；None = 当前链输出（串行模式）。
-        stats: D3DStats——Depth Map 模式用它按本帧 P2/P98 归一化原始深度。
+        stats: D3DStats——Depth Map 模式的 raw 阶段用它按本帧 P2/P98 归一化。
 
-        Depth Map 模式**固定显示模型原始深度**（post.raw，224²，线性上采样
-        到当前分辨率），与 depth_tex 参数无关（2026-11-23 用户定案：深度图
-        看最原始的那张，不看归一化/AA/EMA 之后的）。
+        Depth Map 模式按 depth_map_stage 显示链上某一级（供逐级检查）：
+          raw   = 模型原始深度（post.raw）
+          norm  = 归一化（重标定）之后      ← 默认
+          aa    = 高斯 AA 平滑之后
+          final = EMA 之后（即 3D 实际用的那张）
+        都是线性上采样到当前分辨率。
         """
         self._render_seq += 1
 
@@ -514,13 +550,24 @@ class D3DStereoWindow:
             self._draw_hud()
             self._draw_cursor()
 
+        _dm_stats = stats
         if self._mode == "depth_map":
-            depth_tex = self.post.raw
+            depth_tex, _use_stats = dm_stage_tex(
+                self.post, self.depth_map_stage, depth_tex)
+            if not _use_stats:
+                _dm_stats = None      # 已在显示域，不再按 raw 窗归一化
         self.disp.draw(self._mode, self._color_tex,
                        self.post.depth if depth_tex is None else depth_tex,
                        src_w=src_w or self._texture_size[0],
                        src_h=src_h or self._texture_size[1],
-                       overlay=_overlay, stats=stats)
+                       overlay=_overlay, stats=_dm_stats)
+
+    def set_depth_map_stage(self, stage):
+        """实时切换 Depth Map 显示阶段（raw/norm/aa/final；中文别名亦可）。"""
+        st = _norm_dm_stage(stage)
+        if st != getattr(self, "depth_map_stage", None):
+            self.depth_map_stage = st
+            print(f"[depth] Depth Map 阶段 → {st}", flush=True)
 
     def present(self, nowait=False):
         # D2S_SYNC1=1：不透明平面（alpha=255）时必须让翻转对齐 VBlank，

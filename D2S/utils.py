@@ -140,6 +140,9 @@ FP16 = settings["FP16"]
 # 与旧 "TensorRT" 键（torch 时代遗留）无关。
 INFER_BACKEND = str(settings.get("Infer Backend", "auto")).strip().lower()
 MONITOR_INDEX,  DISPLAY_MODE = settings["Monitor Index"], settings["Display Mode"]
+# Depth Map 模式显示链上哪一级：Raw=模型原始 / Norm=归一化（重标定）后 /
+# AA=高斯平滑后 / Final=EMA 后（3D 实际用的那张）。默认 Norm。可实时切换。
+DEPTH_MAP_STAGE = str(settings.get("Depth Map Stage", "Norm") or "Norm")
 # 采集屏（AB 分离）：独立于输出屏 MONITOR_INDEX。缺省 = 输出屏（老配置无感）。
 # 零拷贝管线要求两者在同一块显卡上——不同卡时 main 启动会弹框提示。
 CAPTURE_MONITOR_INDEX = int(settings.get("Capture Monitor Index",
