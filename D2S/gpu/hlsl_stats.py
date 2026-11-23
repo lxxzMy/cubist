@@ -232,6 +232,17 @@ cbuffer CB : register(b0) { float4 P[16]; };
 groupshared uint g_bin[256];
 groupshared uint g_scan[256];
 
+// bin b 覆盖归一化位置 [(b-0.5)/255, (b+0.5)/255]（HIST_CS：bin = round(t*255)）。
+// 目标秩落在本 bin 内第 r 个样本（c = 本 bin 计数）→ 从 bin **远沿**起算的
+// 线性插值（与 ANCHOR_CS "从近沿向远沿"同一约定）。
+// 旧写法 (b + r/c)/255 把起点放在 bin 中心、终点越到下一 bin 半格 → 所有
+// 分位系统性偏高 0~1 格（2026-11-24 实测 70 个样本全部为正、平均 +0.26%
+// 跨度）；改成从远沿起算后平均偏差 0.000%、最大 |偏| 0.25% 跨度。
+// 越界（bin 0/255 的半个格）由调用方的 saturate 截断。
+float bin_pos(uint b, uint r, uint c) {
+    return ((float)b - 0.5 + saturate((float)r / (float)c)) / 255.0;
+}
+
 [numthreads(256, 1, 1)]
 void CSMain(uint3 tid : SV_DispatchThreadID) {
     uint t = tid.x;
@@ -271,33 +282,27 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
             uint base = acc;
             acc += c;
             if (!got_m1 && c > 0 && t_mid1 <= acc) {
-                float frac = saturate((float)(t_mid1 - base) / (float)c);
-                mid1_v = ((float)b + frac) / 255.0;
+                mid1_v = bin_pos(b, t_mid1 - base, c);
                 got_m1 = true;
             }
             if (!got_m2 && c > 0 && t_mid2 <= acc) {
-                float frac = saturate((float)(t_mid2 - base) / (float)c);
-                mid2_v = ((float)b + frac) / 255.0;
+                mid2_v = bin_pos(b, t_mid2 - base, c);
                 got_m2 = true;
             }
             if (!got_lo && c > 0 && t_lo <= acc) {
-                float frac = saturate((float)(t_lo - base) / (float)c);
-                lo_v = ((float)b + frac) / 255.0;
+                lo_v = bin_pos(b, t_lo - base, c);
                 got_lo = true;
             }
             if (!got_hi && c > 0 && t_hi <= acc) {
-                float frac = saturate((float)(t_hi - base) / (float)c);
-                hi_v = ((float)b + frac) / 255.0;
+                hi_v = bin_pos(b, t_hi - base, c);
                 got_hi = true;
             }
             if (!got_q10 && c > 0 && t_q10 <= acc) {
-                float frac = saturate((float)(t_q10 - base) / (float)c);
-                q10_v = ((float)b + frac) / 255.0;
+                q10_v = bin_pos(b, t_q10 - base, c);
                 got_q10 = true;
             }
             if (!got_q90 && c > 0 && t_q90 <= acc) {
-                float frac = saturate((float)(t_q90 - base) / (float)c);
-                q90_v = ((float)b + frac) / 255.0;
+                q90_v = bin_pos(b, t_q90 - base, c);
                 got_q90 = true;
             }
             if (got_lo && got_hi && got_m1 && got_m2 && got_q10 && got_q90)
@@ -394,8 +399,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
             uint baseb = acc;
             acc += c;
             if (c > 0 && acc >= half) {
-                float frac = saturate((float)(half - baseb) / (float)c);
-                anchor = ((float)b + frac) / 255.0;
+                anchor = saturate(bin_pos(b, half - baseb, c));
                 break;
             }
         }
