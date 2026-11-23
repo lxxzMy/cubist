@@ -5,7 +5,8 @@
   S2 GPU Otsu 近峰中位 vs near_peak_median（归一化域）
   S6/S7/S8 归一化范围（平滑/棘轮/口径对比）
   S10 RGB 场景切换（同色不切 / 换色切；深度判据已删除）
-  S12 最小场景长防抖；S13 自适应阈值（mean+3σ）升起且压低 0.5 级跳变
+  S12 切镜冷却按实际时间；S13 自适应阈值（只收 ≤ 下限的帧、封顶、切镜后清窗）
+  S16 防锁死：同一对画面来回切，阈值不被自己抬高、过冷却就判切
 用法：D2S\\python3\\python.exe -I tools\\v2_stats_smoke.py
 """
 import os
@@ -45,8 +46,11 @@ def main():
     adv = _ad.pick()
     ren = dr.D3DRenderer(luid=(adv.luid if adv else 0), debug=False)
     st = D3DStats(ren, RES)     # 直方图量程 = 每帧 raw 的 min/max（自动）
-    # 逻辑测试关掉防抖（生产默认 15 帧），防抖单独在 S12 验证
-    st.cut_min_scene = 1.0
+    # 切镜冷却用的假时钟（秒）：整个门禁里时间静止，只有 S12/S16 手动推进
+    T = [0.0]
+    st.clock = lambda: T[0]
+    # 逻辑测试关掉冷却（生产默认 0.25s），冷却单独在 S12/S16 验证
+    st.cut_min_scene_s = 0.0
     rng = np.random.default_rng(3)
 
     # 合成双峰 raw（前景 3.8~4.8 / 背景 1.2~2.0）
@@ -80,6 +84,11 @@ def main():
     cC = cA.copy()
     cC[RES // 2:] = (40, 200, 40)
     tA, tB, tC = bgra_tex(cA), bgra_tex(cB), bgra_tex(cC)
+    # cD = cA 的顶部 36% 换成 cB 的颜色 → 与 cA 的色差≈0.36（下限以内的"阵发"波动）
+    cD = cA.copy()
+    _rows = int(RES * 0.36)
+    cD[:_rows] = cB[:_rows]
+    tD = bgra_tex(cD)
 
     ren.begin_frame()
     st.record(raw_tex, cut=False, alpha_range=1.0, range_mode="lerp")
@@ -400,47 +409,101 @@ def main():
     if tv_diff <= CUT_RGB or f_diff != 1.0:
         fails.append(f"S10 换色未切 tv={tv_diff:.3f} f={f_diff}")
 
-    # S12 最小场景长防抖：切后 1 帧再换色不得切；等满 15 帧才允许
-    st.cut_k = 0.0            # 关自适应，隔离防抖逻辑（阈=floor）
-    st.cut_min_scene = 15.0
+    # S12 冷却按【实际时间】（2026-11-24；原按采集帧数——静止桌面几乎不出新帧，
+    # 冷却在实际时间里会被拉长到几秒）：切后 0.20s 内换色不得切；满 0.25s 才允许。
+    # 这里只出 3 帧就过了冷却（按帧数的旧规则需要 15 帧）。
+    st.cut_k = 0.0            # 关自适应，隔离冷却逻辑（阈=floor）
+    st.cut_min_scene_s = 0.25
 
-    def _rec_color(tex, cut=True):
+    def _rec_color(tex, cut=True, dt=1.0 / 60.0):
+        T[0] += dt
         ren.begin_frame()
         st.record(raw_tex, cut=cut, color_tex=tex, color_size=(RES, RES))
         ren.submit(); ren.wait()
         st.readback()
 
-    _rec_color(tA)            # 紧接 S10 的切变帧 → 冷却期，不得切
+    _rec_color(tA)                         # 距上次切 0.017s → 不得切
     f_cool = st.cut_flag
-    for _ in range(15):
-        _rec_color(tA)
-    _rec_color(tB)            # 距上次切 ≥15 帧 → 允许
+    _rec_color(tB, dt=0.20 - 1.0 / 60.0)   # 累计 0.20s → 仍在冷却期内
+    f_cool2 = st.cut_flag
+    _rec_color(tA, dt=0.06)                # 累计 0.26s → 允许
     f_ok = st.cut_flag
-    print(f"[S12] 防抖：切后 1 帧 flag={f_cool:.0f}（期望 0）｜"
-          f"15 帧后换色 flag={f_ok:.0f}（期望 1）", flush=True)
-    if f_cool != 0.0:
-        fails.append(f"S12 冷却期仍切 flag={f_cool}")
+    print(f"[S12] 冷却（按时间）：切后 0.017s flag={f_cool:.0f}（期望 0）｜"
+          f"0.20s flag={f_cool2:.0f}（期望 0）｜0.26s flag={f_ok:.0f}"
+          f"（期望 1）", flush=True)
+    if f_cool != 0.0 or f_cool2 != 0.0:
+        fails.append(f"S12 冷却期内仍切 {f_cool:.0f}/{f_cool2:.0f}")
     if f_ok != 1.0:
         fails.append(f"S12 冷却后未切 flag={f_ok}")
 
-    # S13 自适应阈值：安静 40 帧 → thr=floor；随后 0.5 级连续跳变 → thr 抬升并压住切
+    # S13 自适应阈值（2026-11-24 修"锁死"之后的语义）：
+    #   ① 安静 40 帧 → thr = 下限
+    #   ② 超过下限的跳变不入窗：0.5 级来回跳，每帧都判切，thr 仍是下限
+    #      （旧实现把这些跳变收进窗口 → thr 被顶到 0.775、反过来压住切）
+    #   ③ 下限以内的阵发波动（0 / 0.36）把阈值抬高，但不超过封顶
+    #   ④ 切镜后清窗：切镜的下一帧阈值立即回到下限
     st.cut_k = 3.0
-    st.cut_min_scene = 1.0
+    st.cut_min_scene_s = 0.0
     for _ in range(40):
         _rec_color(tC)
     thr_quiet = st.cut_thr
-    for i in range(10):
+    f_jump = []
+    for i in range(20):
         _rec_color(tC if i % 2 == 0 else tA)
+        f_jump.append(int(st.cut_flag))
     thr_busy, tv_busy, f_busy = st.cut_thr, st.rgb_tv, st.cut_flag
-    print(f"[S13] 安静 thr={thr_quiet:.3f}（floor {CUT_RGB}）｜"
-          f"0.5 级跳变后 TV={tv_busy:.3f} thr={thr_busy:.3f} "
-          f"flag={f_busy:.0f}", flush=True)
+    print(f"[S13] 安静 thr={thr_quiet:.3f}（floor {CUT_RGB}）｜0.5 级来回跳 "
+          f"TV={tv_busy:.3f} thr={thr_busy:.3f} flag={f_busy:.0f}｜"
+          f"后 19 帧判切 {sum(f_jump[1:])}/19", flush=True)
     if abs(thr_quiet - CUT_RGB) > 0.01:
         fails.append(f"S13 安静期阈值 {thr_quiet:.3f} != floor")
-    if thr_busy < 0.60:
-        fails.append(f"S13 自适应阈值未抬升 {thr_busy:.3f}")
-    if f_busy != 0.0:
-        fails.append(f"S13 高阈下仍切 tv={tv_busy:.3f} thr={thr_busy:.3f}")
+    if abs(thr_busy - CUT_RGB) > 0.01:
+        fails.append(f"S13 阈值被切镜级跳变抬高 {thr_busy:.3f}（应留在 floor）")
+    if f_busy != 1.0 or sum(f_jump[1:]) != 19:
+        fails.append(f"S13 超下限的跳变未逐帧判切 {f_jump}")
+    # ③ 阵发的下限内波动：A→D、D→A（0.36）、A→A（0）循环
+    for i in range(24):
+        _rec_color(tD if i % 3 != 2 else tA)
+    thr_burst, tv_burst, f_burst = st.cut_thr, st.rgb_tv, st.cut_flag
+    print(f"[S13] 阵发 0/0.36：TV={tv_burst:.3f} thr={thr_burst:.3f}"
+          f"（封顶 {st.cut_adapt_max:.2f}）flag={f_burst:.0f}", flush=True)
+    if f_burst != 0.0 or tv_burst > CUT_RGB:
+        fails.append(f"S13 下限内波动被判切 tv={tv_burst:.3f}")
+    if not (CUT_RGB < thr_burst <= st.cut_adapt_max + 1e-3):
+        fails.append(f"S13 阵发后阈值 {thr_burst:.3f} 不在 "
+                     f"({CUT_RGB}, {st.cut_adapt_max}]")
+    # ④ 切镜后清窗
+    _rec_color(tB)                         # 色差 1.0 → 切
+    f_clear = st.cut_flag
+    _rec_color(tB)                         # 同画面再来一帧：窗已清 → 阈值回下限
+    thr_after = st.cut_thr
+    print(f"[S13] 切镜清窗：切帧 flag={f_clear:.0f}，下一帧 thr={thr_after:.3f}"
+          f"（期望 floor）", flush=True)
+    if f_clear != 1.0 or abs(thr_after - CUT_RGB) > 1e-3:
+        fails.append(f"S13 切镜后未清窗 flag={f_clear:.0f} thr={thr_after:.3f}")
+
+    # S16 防锁死（2026-11-24 用户实测"同一对画面有时切有效、有时切无效"）：
+    # 同一对画面来回切，间隔 0.06s（≈静止桌面：一次切换只出两三个采集帧）。
+    # 旧实现每帧色差都入窗 → 阈值 0.50→0.71→…→1.76，第 2 次起永远不判切。
+    # 现在：阈值不超过封顶；每逢过了冷却（0.25s）的那一次切换都判切 →
+    # 每 5 次一切（0.06×5=0.30s ≥ 0.25s）。
+    st.cut_min_scene_s = 0.25
+    for _ in range(40):
+        _rec_color(tA)                     # 回到 A 并离开上一个切镜的冷却期
+    flags, thrs = [], []
+    for i in range(12):
+        _tex = tB if i % 2 == 0 else tA
+        _rec_color(_tex, dt=0.06)          # 切换帧
+        flags.append(int(st.cut_flag))
+        thrs.append(st.cut_thr)
+        _rec_color(_tex, dt=0.0)           # 同画面再出一个采集帧
+    expect = [1, 0, 0, 0, 0] * 2 + [1, 0]
+    print(f"[S16] 同一对画面来回切 12 次：判切 {flags}｜阈值最大 "
+          f"{max(thrs):.3f}（封顶 {st.cut_adapt_max:.2f}）", flush=True)
+    if flags != expect:
+        fails.append(f"S16 判切序列 {flags} != {expect}")
+    if max(thrs) > st.cut_adapt_max + 1e-3:
+        fails.append(f"S16 阈值越顶 {max(thrs):.3f}")
 
     # S11 近侧主体峰锚：两个近景主体 + 远景 → 锚到更近的主体。
     # 锚 = 近侧 q=10% 质量分位（2026-11-22 定案，原 5%）：主体须占画面

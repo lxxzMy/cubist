@@ -7,7 +7,8 @@
   quant_cs  : hist → stats[0]=lo(P2 值域) stats[1]=hi(P98)
              stats[2]=近峰中位（Otsu 分裂近类中位，收敛锚）
   rgb_hist_cs: 颜色 4096-bin(16³) 直方图 TV → stats[8]（遥测）/[9]（cut 决策）
-               /[10]（自适应阈值）；thr = max(0.40, mean+3σ) 30 帧窗 + 最小场景长 15
+               /[10]（自适应阈值）；thr = max(0.40, mean+3σ) 30 帧窗
+               （只收 ≤ 下限的帧、封顶 0.50、切镜后清窗）+ 冷却 0.25s（实际时间）
 
 stats buffer：uint[8]（StructuredBuffer/RWStructuredBuffer，stride 4）。
   [4] = P50（归一化域，本帧原始值；收敛面直取，无 EMA）
@@ -123,11 +124,17 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
 #   - 4 bit/通道 = 4096 bins 是论文常用分箱（TRECVID 系）；
 #   - TV 经验域：同镜头运动 0.02~0.12、摇镜 0.12~0.30、硬切 0.35~0.75；
 #   - 固定阈值必然在某类片子上失效 → thr = max(floor, mean + K·std)
-#     （30 帧滑窗，K=3；样本 <8 时只用 floor）；
-#   - 最小场景长防抖（PySceneDetect min_scene_len=15）。
+#     （30 帧滑窗，K=3；样本 <8 时只用 floor）。**只统计被 floor 容忍的帧**
+#     （tv ≤ floor）：切镜级跳变不是正常波动，入窗只会让阈值追着切镜自己涨
+#     （2026-11-24 实测：来回切同一对画面，阈值被顶到 1.76 锁死、再也切不动）；
+#     阈值另有封顶 P[1].w，切镜后清窗；
+#   - 冷却按【实际时间】计（P[2].z 秒；下限 0.25s = 15 帧@60fps，
+#     PySceneDetect min_scene_len=15 的秒数等价）：静止桌面几乎不出采集帧，
+#     按帧数计的冷却在实际时间里会被拉长到几秒。首帧无前帧，不算切镜。
 # 采样：1/2 网格（112²，P[1].z=step）× 2×2 box 平均（抗混叠）；
 # 统计上 12.5k 面积平均样本对 0.4 阈值的 TV 噪声 ~0.005，远低于判别余量。
-# uav_tv 环形状态：[0]帧号 [1]上次切+1 [2]写指针 [3]样本数 [4..35]TV 环。
+# uav_tv 状态：[0]帧号 [1]上次切帧+1（0=从未切）[2]写指针 [3]样本数
+#             [4..35]TV 环 [36]上次切镜时刻（秒）。
 RGB_HIST_CS = """
 Texture2D<float4> tex_color : register(t0);   // BGRA8（D3D 自动 .x=R）
 RWStructuredBuffer<uint> uav_prev : register(u0);   // 上帧 4096-bin
@@ -191,8 +198,10 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID) {
         uint lastp = uav_tv[1];               // 上次切帧号 +1（0=从未切）
         uint wi = uav_tv[2] % 32u;
         uint cnt = min(uav_tv[3], 32u);
-        // 自适应阈值：只看【本帧之前】的窗口（本帧大跳变不得抬高自己的门槛）
-        float thr = P[0].w;                   // 固定下限（硬切起点 0.40）
+        float floor_thr = P[0].w;             // 固定下限（硬切起点 0.40）
+        // 自适应阈值：只看【本帧之前】的窗口（本帧大跳变不得抬高自己的门槛），
+        // 并封顶 P[1].w——色差上限是 1，阈值一旦高过它就永远切不动
+        float thr = floor_thr;
         if (cnt >= 8u) {
             float m = 0.0, sq = 0.0;
             for (uint k = 0; k < 32u; ++k) {
@@ -202,20 +211,33 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID) {
             }
             m /= (float)cnt;
             float var = max(0.0, sq / (float)cnt - m * m);
-            thr = max(thr, m + P[1].y * sqrt(var));
+            thr = min(P[1].w, max(thr, m + P[1].y * sqrt(var)));
         }
+        // 冷却按实际时间：距上次切镜 ≥ P[2].z 秒（P[2].y = 当前秒，[36] = 上次切镜秒）
         bool cooldown = (lastp == 0u) ||
-            (frame + 1u - lastp >= (uint)P[2].x);
-        bool cut = (P[1].x > 0.5) && (tv > thr) && cooldown;
+            ((P[2].y - asfloat(uav_tv[36])) >= P[2].z);
+        // 首帧没有前帧（上帧直方图为空 → TV=1），不是场景切换
+        bool first = (frame == 0u);
+        bool cut = (P[1].x > 0.5) && !first && (tv > thr) && cooldown;
         uav_stats[8] = asuint(tv);            // RGB TV（遥测）
         uav_stats[9] = asuint(cut ? 1.0 : 0.0);
         uav_stats[10] = asuint(thr);          // 本帧实际阈值（遥测）
         if (cut) uav_stats[27] = 1u;
-        // 入窗（决策之后，供后续帧使用）
-        uav_tv[4u + wi] = asuint(tv);
-        uav_tv[2] = (wi + 1u) % 32u;
-        uav_tv[3] = min(cnt + 1u, 32u);
-        if (cut) uav_tv[1] = frame + 1u;
+        if (cut) {
+            // 切镜后清窗：新场景的"正常波动"统计从零重建
+            wi = 0u;
+            cnt = 0u;
+            uav_tv[1] = frame + 1u;
+            uav_tv[36] = asuint(P[2].y);
+        } else if (tv <= floor_thr) {
+            // 入窗（决策之后，供后续帧使用）：只收被下限容忍的帧。切镜级跳变
+            // ——包括冷却期内被压掉的那些——不是正常波动，不得抬高自己的门槛
+            uav_tv[4u + wi] = asuint(tv);
+            wi = (wi + 1u) % 32u;
+            cnt = min(cnt + 1u, 32u);
+        }
+        uav_tv[2] = wi;
+        uav_tv[3] = cnt;
         uav_tv[0] = frame + 1u;
     }
 }

@@ -20,11 +20,15 @@ stats buffer 布局（uint[8] structured，float 位模式）：
 全自动）。手填区间的两个毛病都由它消掉：太短 → 越界样本挤进末格、P98 顶死
 在端点；太长 → 数据只占少数 bin、分位变粗。
 
-z 乒乓：z_cur 写本帧 z_sub（PS 采样 raw ::4 + 本帧 lo/hi 归一化），
-z_prev 读上帧（cut 对比）；帧末交换，无拷贝。
+场景切换（cut）= 纯 RGB 判据（2026-11-22 用户定案，深度判据已删）：
+RGB_HIST_CS 算前后两帧颜色直方图 TV，tv > thr 且过了冷却 → stats[9]=1
+（PP_STATS_FS 读到后 EMA 当帧直通）。thr = min(封顶, max(下限, mean+K·std))，
+统计窗**只收 ≤ 下限的帧**、切镜后清窗——否则阈值会被切镜自己抬高到锁死
+（2026-11-24 修）。冷却按实际时间（秒）而非采集帧数。
 """
 import ctypes
 import os
+import time
 
 import numpy as np
 
@@ -46,9 +50,14 @@ CUT_RES = 0.35      # 旧逐像素口径（仅 depth_norm CPU 参照保留）
 # RGB 场景切换（4-bit/通道 = 4096 bins 直方图 TV；2026-11-22 调研定值）：
 # 同镜头运动 0.02~0.12 / 摇镜 0.12~0.30 / 硬切 0.35~0.75；
 # 固定阈值必在某类片上失效 → 自适应 thr = max(floor, mean + K·std)。
-CUT_RGB = 0.40       # 硬切下限（FFmpeg scene 0.4 平衡档 / 论文 0.35~0.5）
-CUT_ADAPT_K = 3.0    # 自适应系数（30 帧窗，样本 <8 只用下限）
-CUT_MIN_SCENE = 15   # 最小场景长（帧；PySceneDetect 默认 15，防抖）
+CUT_RGB = 0.40         # 硬切下限（FFmpeg scene 0.4 平衡档 / 论文 0.35~0.5）
+CUT_ADAPT_K = 3.0      # 自适应系数（30 帧窗，样本 <8 只用下限）
+CUT_ADAPT_MAX = 0.50   # 自适应阈值封顶：窗里只收 ≤ 下限的帧，但 mean+K·std 在
+                       # 双峰（0 / 下限值）下仍能到 0.8——色差上限是 1，阈值一旦
+                       # 高过它就永远切不动
+CUT_MIN_SCENE_S = 0.25  # 两次切镜最小间隔（秒）= 15 帧 @60fps（PySceneDetect
+                        # min_scene_len=15）。按实际时间而非采集帧数：静止桌面
+                        # 几乎不出新帧，按帧数计会被拉长到几秒（2026-11-24）
 RGB_SAMPLE_STEP = 2  # 颜色直方图采样步长（224/2=112² 网格；成本 ~0.16ms）
 # 收敛锚：显示深度的【近侧质量分位】——从近端累计 q·N 质量的深度。
 # 单一连续估计器（无峰检测/Otsu/回退切换）。2026-11-22 用户定案 q=10%
@@ -125,15 +134,24 @@ class D3DStats:
         _bl, _bs = self._band(self.range_mode)
         print(f"[stats] 归一化口径 = {self.range_mode}"
               f"（映射带 [{_bl:g}, {_bl + _bs:g}]）", flush=True)
-        # RGB 切变判据参数（env 可调；确定性测试可直接改这三个属性）
+        # RGB 切变判据参数（env 可调；确定性测试可直接改这几个属性）
         self.cut_floor = float(os.environ.get("D2S_CUT_RGB", str(CUT_RGB)))
         self.cut_k = float(os.environ.get("D2S_CUT_ADAPT_K",
                                           str(CUT_ADAPT_K)))
-        self.cut_min_scene = float(os.environ.get("D2S_CUT_MIN_SCENE",
-                                                  str(CUT_MIN_SCENE)))
+        self.cut_adapt_max = float(os.environ.get("D2S_CUT_ADAPT_MAX",
+                                                  str(CUT_ADAPT_MAX)))
+        self.cut_min_scene_s = float(os.environ.get(
+            "D2S_CUT_MIN_SCENE_MS",
+            str(CUT_MIN_SCENE_S * 1000.0))) / 1000.0
+        # 切镜冷却用的时钟（秒，自本对象创建起）；测试换成假时钟即可控制冷却
+        self._t0 = time.perf_counter()
+        self.clock = self._perf_now
         # 收敛锚近侧质量分位（0.05 = 最近的 5% 质量所在深度）
         self.anchor_q = float(os.environ.get("D2S_ANCHOR_Q",
                                              str(ANCHOR_Q)))
+
+    def _perf_now(self):
+        return time.perf_counter() - self._t0
 
     def _range_alpha(self, a_range):
         """返回范围平滑 α：显式给值则直用（测试）；否则按真实帧间隔算。
@@ -175,8 +193,10 @@ class D3DStats:
         cut=False 时 RGB 仍算 TV（遥测）但不触发切变决策（供确定性测试）。
         color_tex/color_size: 采集帧 BGRA8 + (w,h)；缺失时无 cut 判据
         （stats[8]/[9] 被 ZERO_CS 清零）。
-        RGB 判据 = TV(4096 bins) > max(cut_floor, mean + cut_k·std)
-        （30 帧滑窗，均不含本帧）且距上次切 ≥ cut_min_scene 帧。
+        RGB 判据 = TV(4096 bins) > min(cut_adapt_max,
+        max(cut_floor, mean + cut_k·std))（30 帧滑窗，均不含本帧，只收
+        ≤ cut_floor 的帧，切镜后清窗）且距上次切镜 ≥ cut_min_scene_s 秒
+        （实际时间，self.clock()）。首帧不算切镜。
         alpha_range=归一化范围的平滑系数（None=按 τ 与真实 dt 算，
         显式值供确定性门禁）。扩张/收缩统一。
         """
@@ -207,14 +227,17 @@ class D3DStats:
             color_tex.transition(ST_ALL_SRV)
             self.rgb_prev.transition(ST_UAV)
             self.tv_hist.transition(ST_UAV)
+            # cbuffer：P[0]=(res, w, h, 下限) P[1]=(enable, K, step, 封顶)
+            #           P[2]=(0, 当前秒, 冷却秒, 0)
             ren.dispatch(self._p_rgb,
                          [self.rgb_prev, self.stats, self.tv_hist],
                          [color_tex],
                          [float(self.res), float(w), float(h),
                           float(self.cut_floor),
                           1.0 if cut else 0.0, float(self.cut_k),
-                          float(RGB_SAMPLE_STEP), 0.0,
-                          float(self.cut_min_scene), 0.0, 0.0, 0.0], 1)
+                          float(RGB_SAMPLE_STEP), float(self.cut_adapt_max),
+                          0.0, float(self.clock()),
+                          float(self.cut_min_scene_s), 0.0], 1)
             self.stats.uav_barrier()
         # 分位 + Otsu 锚（hist UAV→NON_PIXEL_SRV 直转，compute 读态）
         self.hist.transition(ST_NON_PIXEL_SRV)
