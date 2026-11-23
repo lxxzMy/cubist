@@ -318,9 +318,8 @@ Model List:
   DepthPro-Large:
     resolutions:
     - 1536
-Depth Model: d224
 Depth Resolution: 224
-Depth Map Stage: Norm
+Depth Map Stage: Final
 Anti-aliasing: 3
 Foreground Scale: 0
 Convergence Tau: 2.0

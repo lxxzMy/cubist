@@ -141,7 +141,10 @@ def main():
     os.environ["PATH"] = (os.path.join(ROOT, "release", args.rel, "runtime")
                           + os.pathsep + os.environ.get("PATH", ""))
     os.environ["D2S_ZEROCOPY"] = "0"       # 走读回路径：对拍管数学，不管传输
-    os.environ["D2S_ONNX"] = ""
+    # 参考链固定 DepthART-224（产品默认模型已是 ZipDepth 宽屏 512×288）
+    os.environ["D2S_DEPTH_MODEL"] = "d224"
+    os.environ["D2S_ONNX"] = os.path.join(ROOT, "release", args.rel, "models",
+                                          "depth-224.onnx")
 
     import moderngl  # noqa: F401
     import onnxruntime as _ort

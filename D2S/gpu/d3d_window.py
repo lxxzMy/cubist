@@ -57,7 +57,8 @@ _MODE_MAP = {
     "Passthrough": "passthrough", "Depth Map": "depth_map",
 }
 
-# Depth Map 模式显示链上哪一级（设置 "Depth Map Stage" / 面板「深度图阶段」）
+# Depth Map 模式显示链上哪一级（yaml "Depth Map Stage"；面板已不提供切换，
+# 默认 Final = 3D 实际用的那张）
 _DM_STAGES = {
     "raw": "raw", "原始": "raw",
     "norm": "norm", "normalized": "norm", "normalize": "norm",
@@ -68,8 +69,8 @@ _DM_STAGES = {
 
 
 def _norm_dm_stage(s):
-    """阶段设置值（英/中）→ raw/norm/aa/final（缺省 norm）。"""
-    return _DM_STAGES.get(str(s or "norm").strip().lower(), "norm")
+    """阶段设置值（英/中）→ raw/norm/aa/final（缺省 final）。"""
+    return _DM_STAGES.get(str(s or "final").strip().lower(), "final")
 
 
 def dm_stage_tex(post, stage, final_tex=None):
@@ -131,7 +132,7 @@ class D3DStereoWindow:
                  feather_enabled=False, cursor_overlay=False, show_fps=False,
                  frame_size=(1280, 720), vsync=False, fix_aspect=False,
                  specify_display=False, same_screen=True, depth_res=224,
-                 prep_normalize=True, depth_map_stage="Norm", **_kw):
+                 prep_normalize=True, depth_map_stage="Final", **_kw):
         from utils import VERSION  # noqa: F401  （导入期健康检查）
         # Depth Map 模式显示哪一级（raw/norm/aa/final；默认归一化后）
         self.depth_map_stage = _norm_dm_stage(depth_map_stage)

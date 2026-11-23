@@ -25,7 +25,9 @@ sys.path.insert(0, os.path.join(ROOT, "D2S"))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 os.environ["PATH"] = os.path.join(ROOT, "runtime") + os.pathsep + os.environ.get("PATH", "")
 os.environ["D2S_TEMPORAL"] = "ema"
-os.environ["D2S_ONNX"] = ""
+# 参考链固定 DepthART-224（产品默认模型已是 ZipDepth 宽屏 512×288）
+os.environ["D2S_DEPTH_MODEL"] = "d224"
+os.environ["D2S_ONNX"] = os.path.join(ROOT, "runtime", "depth-224.onnx")
 
 RES = 224
 WARMUP = 20

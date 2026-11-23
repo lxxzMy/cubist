@@ -37,6 +37,11 @@ LOCAL_MODELS = {
                     prep_norm=False, license="MIT"),
 }
 
+# 产品深度模型（2026-11-24 用户定案："ZipDepth 宽屏 512，就这个了"）。
+# 设置面板不再提供模型选择，utils.MODEL 固定取它、忽略 yaml 里的旧键；
+# 开发/对比实验用环境变量 D2S_DEPTH_MODEL 临时切换到注册表里的其它键。
+PRODUCT_MODEL = "zipw512"
+
 # Model Mapping Dict
 MODEL_MAPPING = {
     # 本地 ONNX 档位：由注册表生成（内部 id = local/<key>）

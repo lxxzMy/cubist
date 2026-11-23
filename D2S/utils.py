@@ -109,7 +109,8 @@ from platform_probe import (OS_NAME, get_font_type, get_fps, get_monitor_size,
                            user32, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
                            hide_window_from_capture, show_window_in_capture)
 from model_catalog import (MODEL_MAPPING, DEPTH_MODEL_FILES,
-                          available_depth_models)
+                          available_depth_models, PRODUCT_MODEL,
+                          local_model_spec as _product_model_spec)
 
 # Get settings
 RUN_MODE = settings["Run Mode"]
@@ -118,7 +119,13 @@ USE_3D_MONITOR = False
 
 # Add for FrameGen
 LOSSLESS_SCALING_SUPPORT = False
-MODEL = settings["Depth Model"]
+# 产品深度模型固定（model_catalog.PRODUCT_MODEL = ZipDepth 宽屏 512×288，
+# 2026-11-24 用户定案）。**不读 yaml 的 "Depth Model"**：设置面板已经没有模型
+# 选择，旧配置里残留的档位若仍生效，升级后会悄悄跑回别的模型。开发/对比实验
+# 用环境变量 D2S_DEPTH_MODEL 临时切换（取值 = LOCAL_MODELS 的键；无效值回落）。
+_env_model = os.environ.get("D2S_DEPTH_MODEL", "").strip()
+MODEL = _env_model if (_env_model and _product_model_spec(_env_model)) \
+    else PRODUCT_MODEL
 MODEL_ID = MODEL_MAPPING.get(MODEL, f"local/{MODEL}")
 ALL_MODELS = settings["Model List"]
 CACHE_PATH = "./models"
@@ -141,8 +148,9 @@ FP16 = settings["FP16"]
 INFER_BACKEND = str(settings.get("Infer Backend", "auto")).strip().lower()
 MONITOR_INDEX,  DISPLAY_MODE = settings["Monitor Index"], settings["Display Mode"]
 # Depth Map 模式显示链上哪一级：Raw=模型原始 / Norm=归一化（重标定）后 /
-# AA=高斯平滑后 / Final=EMA 后（3D 实际用的那张）。默认 Norm。可实时切换。
-DEPTH_MAP_STAGE = str(settings.get("Depth Map Stage", "Norm") or "Norm")
+# AA=高斯平滑后 / Final=EMA 后（3D 实际用的那张）。默认 Final；面板已不提供
+# 切换（2026-11-24），这里只留 yaml 键给开发用。可实时切换。
+DEPTH_MAP_STAGE = str(settings.get("Depth Map Stage", "Final") or "Final")
 # 采集屏（AB 分离）：独立于输出屏 MONITOR_INDEX。缺省 = 输出屏（老配置无感）。
 # 零拷贝管线要求两者在同一块显卡上——不同卡时 main 启动会弹框提示。
 CAPTURE_MONITOR_INDEX = int(settings.get("Capture Monitor Index",

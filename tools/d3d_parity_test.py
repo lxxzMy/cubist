@@ -22,7 +22,8 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 os.environ["PATH"] = os.path.join(ROOT, "runtime") + os.pathsep + os.environ.get("PATH", "")
 os.environ["D2S_TEMPORAL"] = "ema"
 # 门禁固定 DepthART-224（CPU 参考链是它的语义：ImageNet 归一化 + 224²）；
-# dev settings 可能被切到 448 / ZipDepth 做实验，不能跟着变。
+# dev settings / 产品默认模型（已固定为 ZipDepth 宽屏 512×288）变了也不跟着变。
+os.environ["D2S_DEPTH_MODEL"] = "d224"
 os.environ["D2S_ONNX"] = os.path.join(ROOT, "runtime", "depth-224.onnx")
 
 RES = 224

@@ -17,7 +17,10 @@ sys.path.insert(0, os.path.join(ROOT, "D2S"))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 os.environ["PATH"] = os.path.join(ROOT, "runtime") + os.pathsep + os.environ.get("PATH", "")
 os.environ["D2S_TEMPORAL"] = "ema"
-os.environ["D2S_ONNX"] = ""
+# 参考链（CPU ONNX）固定 DepthART-224：产品模型已固定为 ZipDepth 宽屏 512×288
+# （输入尺寸/预处理都不同），门禁不能跟着产品默认值走。
+os.environ["D2S_DEPTH_MODEL"] = "d224"
+os.environ["D2S_ONNX"] = os.path.join(ROOT, "runtime", "depth-224.onnx")
 
 WIN_W, WIN_H = 640, 240
 TEX_W, TEX_H = 320, 240
