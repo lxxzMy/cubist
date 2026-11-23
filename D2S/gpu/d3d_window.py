@@ -382,14 +382,11 @@ class D3DStereoWindow:
         else:
             self.prep.run()
 
-    def postprocess_gpu(self, raw, lo, hi, alpha, aa, grow=0, slope=0.0,
-                        parallax=0.0, iters=6, close_px=0, cut=False):
+    def postprocess_gpu(self, raw, lo, hi, alpha, aa, cut=False):
         if isinstance(raw, np.ndarray):
             self.post.upload_raw(raw)
-        self.post.spatial_chain(lo, hi, aa_texels=aa, grow=grow,
-                                slope_target=slope, slope_m=parallax,
-                                iters=iters, temporal="ema", alpha=alpha,
-                                cut=cut)
+        self.post.spatial_chain(lo, hi, aa_texels=aa, temporal="ema",
+                                alpha=alpha, cut=cut)
         self._frame_has_depth = True
 
     def read_depth_median(self):

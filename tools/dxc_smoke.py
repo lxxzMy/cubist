@@ -17,8 +17,8 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 os.environ["PATH"] = os.path.join(ROOT, "runtime") + os.pathsep + os.environ.get("PATH", "")
 
 from gpu.hlsl import compile_shader, FULLSCREEN_VS  # noqa: E402
-from gpu.hlsl_depth import (DIL_FS, ERO_FS, GAUSS_FS, MEDIAN_FS, PP_FS,  # noqa: E402
-                            PREP_FS, SLOPE_FS)
+from gpu.hlsl_depth import (GAUSS_FS, MEDIAN_FS, NORM_FS, NORM_STATS_FS,  # noqa: E402
+                            PP_FS, PP_STATS_FS, PREP_FS)
 from gpu.hlsl_display import (DEPTH_MAP_FS, DIBR_FS, INTERLEAVED_FS,  # noqa: E402
                               PASSTHROUGH_FS)
 
@@ -36,8 +36,8 @@ def main():
 
     # X1 全 shader 编译
     shaders = [
-        ("depth_prep", PREP_FS, "ps"), ("depth_dil", DIL_FS, "ps"),
-        ("depth_slope", SLOPE_FS, "ps"), ("depth_ero", ERO_FS, "ps"),
+        ("depth_prep", PREP_FS, "ps"), ("depth_norm", NORM_FS, "ps"),
+        ("depth_norm_stats", NORM_STATS_FS, "ps"),
         ("depth_gauss", GAUSS_FS, "ps"), ("depth_ema_pp", PP_FS, "ps"),
         ("depth_median", MEDIAN_FS, "ps"),
         ("view_passthrough", PASSTHROUGH_FS, "ps"),
@@ -62,11 +62,11 @@ def main():
         fails.append(f"X1 fs_vs 走了 {vs.compiler}")
     else:
         ok += 1
-    print(f"[X1] {ok}/12 shader dxc 编译成功", flush=True)
+    print(f"[X1] {ok}/{len(shaders) + 1} shader dxc 编译成功", flush=True)
 
     # X1b 缓存命中
     try:
-        c2 = compile_shader("depth_dil", DIL_FS, "ps")
+        c2 = compile_shader("depth_norm", NORM_FS, "ps")
         print(f"[X3] 缓存命中 OK（{c2.nbytes}B {c2.compiler}）", flush=True)
     except Exception as e:
         fails.append(f"X3 缓存: {e}")

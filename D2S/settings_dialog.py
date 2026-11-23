@@ -1229,13 +1229,12 @@ class SettingsDialog(tk.Tk):
             v = var.get()
             if key in ("Depth Resolution", "Parallax (px)", "Monitor Index",
                        "Capture Monitor Index",
-                       "Anti-aliasing",
-                       "Depth Close (px)", "Depth Grow (px)"):
+                       "Anti-aliasing"):
                 out[key] = int(v)
             elif key == "Cursor Scale":
                 out[key] = round(float(v), 2)
             elif key in ("Convergence", "Depth Gamma", "Convergence Bias",
-                         "Convergence Tau", "Depth Slope Limit"):
+                         "Convergence Tau"):
                 _q = Decimal(str(v)).quantize(Decimal("0.001"),
                                               rounding=ROUND_HALF_UP)
                 if _q == 0:

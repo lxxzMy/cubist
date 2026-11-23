@@ -278,14 +278,8 @@ EDGE_FALLOFF = 0.0 if str(_ef).strip().lower() in ("false", "0", "no") else 0.01
 TOGGLE_HOTKEY = str(settings.get("Toggle Hotkey", "ctrl+f2")).strip().lower()
 if TOGGLE_HOTKEY not in ("ctrl+f2", "pause", "scrolllock", "f10", "ctrl+f10"):
     TOGGLE_HOTKEY = "ctrl+f2"
-# Grow the near surface by N low-res pixels (max filter). The model erodes a
-# person's silhouette by a pixel or two, and those eroded pixels then shift like
-# the background - which is what drags background blocks inside the outline.
-DEPTH_GROW = 0        # 已废弃：膨胀会把轮廓推出背景（漂移 13.9→26px）
-# 坡度限幅目标：k·|d'| 超过此值才做最小平滑（0 = 关闭）
-DEPTH_SLOPE_LIMIT = 0.0   # 已废弃：seam 反而变差 0.16%→0.76%
-# 闭运算半径（texel）：填深度图里的孤立凹陷（如头发中段的洞），0 = 关闭
-DEPTH_CLOSE = 0       # 已废弃：实测零影响
+# （2026-11-23 删除 DEPTH_GROW / DEPTH_SLOPE_LIMIT / DEPTH_CLOSE：膨胀、
+#   坡度限幅、闭运算三步已从深度链整体移除，相关设置键一并删除。）
 # ParallaxRT-style silhouette handling (ported from dibr_renderer_cuda.cu):
 #   edge snap  - at a strong depth edge, pull the rim pixel's depth onto the
 #                background side so it stops sampling across the layer

@@ -63,9 +63,12 @@ float4 PSMain(VOut i) : SV_Target {
 """
 
 # ---------------------------------------------------------------------------
-# normalize+dilate（depth_post._dil_prog：13×13 max + 区间归一化）
+# 区间归一化（lo/hi 由 cbuffer 传入；生产用 NORM_STATS_FS 从 stats 读）。
+# 只做 lo/hi → 显示带的线性映射：不再做 13×13 膨胀、闭运算、坡度限幅
+# （2026-11-23 定案删除——三步早已废弃为 0，且实测有害：膨胀把轮廓推出
+#   背景、坡度限幅让 seam 变差、闭运算零影响）
 # ---------------------------------------------------------------------------
-DIL_FS = """
+NORM_FS = """
 Texture2D tex_raw : register(t0);
 SamplerState samp : register(s0);
 cbuffer CB : register(b0) { float4 P[16]; };
@@ -74,76 +77,9 @@ struct VOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 
 float4 PSMain(VOut i) : SV_Target {
     float2 uv = i.uv;
-    float res = P[0].x;
-    float lo = P[0].y, hi = P[0].z, grow = P[0].w;
-    float best = -1.0;
-    for (int dy = -6; dy <= 6; ++dy) {
-        for (int dx = -6; dx <= 6; ++dx) {
-            if (abs((float)dx) > grow || abs((float)dy) > grow) continue;
-            best = max(best, tex_raw.SampleLevel(samp,
-                uv + float2((float)dx, (float)dy) / res, 0).r);
-        }
-    }
-    float v = clamp((best - lo) / max(1e-6, hi - lo), 0.0, 1.0);
-    return float4(v, 0.0, 0.0, 1.0);
-}
-"""
-
-# ---------------------------------------------------------------------------
-# 坡度限幅（depth_post._sl_prog：梯度门控 5×5 高斯）
-# ---------------------------------------------------------------------------
-SLOPE_FS = """
-Texture2D tex_d : register(t0);
-SamplerState samp : register(s0);
-cbuffer CB : register(b0) { float4 P[16]; };
-
-struct VOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
-
-float4 PSMain(VOut i) : SV_Target {
-    float2 uv = i.uv;
-    float res = P[0].x;
-    float m = P[1].w, target = P[2].x;   // pack layout: m/target @ P[1].w/P[2].x
-    float2 e = float2(1.0 / res, 0.0);
-    float d0 = tex_d.Sample(samp, uv).r;
-    float gx = (tex_d.Sample(samp, uv + e.xy).r - tex_d.Sample(samp, uv - e.xy).r) * 0.5;
-    float gy = (tex_d.Sample(samp, uv + e.yx).r - tex_d.Sample(samp, uv - e.yx).r) * 0.5;
-    float g = m * length(float2(gx, gy));
-    float sm = 0.0, ws = 0.0;
-    for (int dy = -2; dy <= 2; ++dy) {
-        for (int dx = -2; dx <= 2; ++dx) {
-            float w = exp(-(float)(dx * dx + dy * dy) * 0.5);
-            sm += w * tex_d.Sample(samp, uv + float2((float)dx, (float)dy) / res).r;
-            ws += w;
-        }
-    }
-    sm /= ws;
-    return float4(g > target ? sm : d0, 0.0, 0.0, 1.0);
-}
-"""
-
-# ---------------------------------------------------------------------------
-# 腐蚀（depth_post._ero_prog：9×9 min，闭运算 max 分支）
-# ---------------------------------------------------------------------------
-ERO_FS = """
-Texture2D tex_raw : register(t0);
-SamplerState samp : register(s0);
-cbuffer CB : register(b0) { float4 P[16]; };
-
-struct VOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
-
-float4 PSMain(VOut i) : SV_Target {
-    float2 uv = i.uv;
-    float res = P[0].x;
-    float k = P[2].w;            // pack layout: k @ P[2].w
-    float best = 2.0;
-    for (int dy = -4; dy <= 4; ++dy) {
-        for (int dx = -4; dx <= 4; ++dx) {
-            if (abs((float)dx) > k || abs((float)dy) > k) continue;
-            best = min(best, tex_raw.SampleLevel(samp,
-                uv + float2((float)dx, (float)dy) / res, 0).r);
-        }
-    }
-    return float4(best, 0.0, 0.0, 1.0);
+    float lo = P[0].y, hi = P[0].z;
+    float v = tex_raw.SampleLevel(samp, uv, 0).r;
+    return float4(saturate((v - lo) / max(1e-6, hi - lo)), 0.0, 0.0, 1.0);
 }
 """
 
@@ -249,10 +185,10 @@ float4 PSMain(VOut i) : SV_Target {
 """
 
 # ---------------------------------------------------------------------------
-# 生产版 normalize+dilate：lo/hi 直读 GPU 判据 stats（t7），不走 cbuffer
-# （V2 判据链；公式与 DIL_FS 同，去掉 P[0].y/.z）
+# 生产版区间归一化：lo/hi 直读 GPU 判据 stats（t7），不走 cbuffer
+# （V2 判据链；只做映射，无膨胀）
 # ---------------------------------------------------------------------------
-NORM_DIL_FS = """
+NORM_STATS_FS = """
 Texture2D tex_raw : register(t0);
 StructuredBuffer<uint> g_stats : register(t7);
 SamplerState samp : register(s0);
@@ -262,20 +198,10 @@ struct VOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 
 float4 PSMain(VOut i) : SV_Target {
     float2 uv = i.uv;
-    float res = P[0].x;
-    float grow = P[0].w;
     float lo = asfloat(g_stats[0]), hi = asfloat(g_stats[1]);
-    float best = -1.0;
-    for (int dy = -6; dy <= 6; ++dy) {
-        for (int dx = -6; dx <= 6; ++dx) {
-            if (abs((float)dx) > grow || abs((float)dy) > grow) continue;
-            best = max(best, tex_raw.SampleLevel(samp,
-                uv + float2((float)dx, (float)dy) / res, 0).r);
-        }
-    }
-    float v = saturate(P[3].y + P[3].z *
-                       ((best - lo) / max(1e-6, hi - lo)));
-    return float4(v, 0.0, 0.0, 1.0);
+    float v = tex_raw.SampleLevel(samp, uv, 0).r;
+    float n = saturate((v - lo) / max(1e-6, hi - lo));
+    return float4(saturate(P[3].y + P[3].z * n), 0.0, 0.0, 1.0);
 }
 """
 

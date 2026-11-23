@@ -1636,10 +1636,6 @@ def _main_d3d(mode="Viewer"):
         window.post.upload_raw(raw)
         window.post.spatial_chain(
             0.0, 0.0, aa_texels=_aa_h, aa_v=_aa_v,
-            grow=int(getattr(_depth_mod, "DEPTH_GROW", 0)),
-            slope_target=float(getattr(_depth_mod, "DEPTH_SLOPE_LIMIT", 0.0)),
-            slope_m=float(PARALLAX_PX), iters=6,
-            close_px=int(getattr(_depth_mod, "DEPTH_CLOSE", 0)),
             temporal="ema", alpha=alpha, cut=True, stats=cap["stats"],
             color_tex=src, color_size=cap["zcc"].size)
         _ema_first = False
@@ -1929,11 +1925,6 @@ def _main_d3d(mode="Viewer"):
             _ah, _av = _pl_aa()
             window.post.spatial_chain(
                 0.0, 0.0, aa_texels=_ah, aa_v=_av,
-                grow=int(getattr(_depth_mod, "DEPTH_GROW", 0)),
-                slope_target=float(getattr(_depth_mod,
-                                           "DEPTH_SLOPE_LIMIT", 0.0)),
-                slope_m=float(PARALLAX_PX), iters=6,
-                close_px=int(getattr(_depth_mod, "DEPTH_CLOSE", 0)),
                 temporal="ema", alpha=_alpha, cut=True, stats=_st,
                 color_tex=_src, color_size=cap["zcc"].size)
             _ema_first = False
@@ -1973,11 +1964,6 @@ def _main_d3d(mode="Viewer"):
                 _ah, _av = _pl_aa()
                 window.post.spatial_chain(
                     0.0, 0.0, aa_texels=_ah, aa_v=_av,
-                    grow=int(getattr(_depth_mod, "DEPTH_GROW", 0)),
-                    slope_target=float(getattr(_depth_mod,
-                                               "DEPTH_SLOPE_LIMIT", 0.0)),
-                    slope_m=float(PARALLAX_PX), iters=6,
-                    close_px=int(getattr(_depth_mod, "DEPTH_CLOSE", 0)),
                     temporal="ema", alpha=_alpha, cut=True, stats=_st,
                     color_tex=_src, color_size=cap["zcc"].size,
                     raw_buf=_pl["raw_buf"])
@@ -2947,11 +2933,6 @@ def main(mode="Viewer"):
                             import traceback as _tb_mc
                             _tb_mc.print_exc()
                 window.postprocess_gpu(window._raw_tex, lo, hi, alpha, aa,
-                                       int(getattr(_depth_mod, "DEPTH_GROW", 0)),
-                                       float(getattr(_depth_mod, "DEPTH_SLOPE_LIMIT", 0.0)),
-                                       float(PARALLAX_PX),
-                                       iters=6,
-                                       close_px=int(getattr(_depth_mod, "DEPTH_CLOSE", 0)),
                                        cut=_cut)
                 # （收敛锚读回已延迟到下一步开头——见 _gpu_depth_step 顶部）
                 if rich:
@@ -3138,17 +3119,6 @@ def main(mode="Viewer"):
                                     window.set_edge_snap_gain(float(_req["Depth Edge Snap Gain"]))
                                 except Exception:
                                     pass
-                            for _pk, _pattr, _pcast in (
-                                    ("Depth Close (px)", "DEPTH_CLOSE", int),
-                                    ("Depth Grow (px)", "DEPTH_GROW", int),
-                                    ("Depth Slope Limit", "DEPTH_SLOPE_LIMIT", float)):
-                                if _pk in _req:
-                                    try:
-                                        setattr(_depth_mod, _pattr, _pcast(_req[_pk]))
-                                        print(f"[depth] {_pk} = {getattr(_depth_mod, _pattr)}",
-                                              flush=True)
-                                    except Exception:
-                                        pass
                             window.apply_live_params(_req)
                             print(f"[settings] live params applied: {_req}",
                                   flush=True)

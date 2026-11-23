@@ -226,10 +226,6 @@ def main():
             cut = cut_hit(z, prevz)
             prevz = z
             w.postprocess_gpu(w._raw_tex, lo, hi, alpha, aa_t,
-                              int(getattr(depth, "DEPTH_GROW", 0)),
-                              float(getattr(depth, "DEPTH_SLOPE_LIMIT", 0.0)),
-                              0.0, iters=6,
-                              close_px=int(getattr(depth, "DEPTH_CLOSE", 0)),
                               cut=cut)
             buf = w._post.depth_fbo.read(components=1, dtype="f4")
             outs.append(np.frombuffer(buf, np.float32).reshape(res, res).copy())
@@ -282,10 +278,6 @@ def main():
         cut = _ch(z, _prevz)
         _prevz = z
         w.postprocess_gpu(w._raw_tex, lo, hi, alpha, aa_t,
-                          int(getattr(depth, "DEPTH_GROW", 0)),
-                          float(getattr(depth, "DEPTH_SLOPE_LIMIT", 0.0)),
-                          0.0, iters=6,
-                          close_px=int(getattr(depth, "DEPTH_CLOSE", 0)),
                           cut=cut)
 
     for f in [seq[0]] * 6:

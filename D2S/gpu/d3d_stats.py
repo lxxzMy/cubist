@@ -2,7 +2,7 @@
 """GPU 判据链编排（V2）：raw 深度 → 直方图 → 分位/Otsu 锚 → z_sub → cut。
 
 全部 compute/PS（d3drender compute 基建 + 图形根签名 t7），链 shader 直读
-stats buffer（NORM_DIL_FS/PP_STATS_FS）。唯一 CPU 读回 = stats 4 floats
+stats buffer（NORM_STATS_FS/PP_STATS_FS）。唯一 CPU 读回 = stats 4 floats
 （收敛锚 UI 语义，延迟一帧）。
 
 stats buffer 布局（uint[8] structured，float 位模式）：

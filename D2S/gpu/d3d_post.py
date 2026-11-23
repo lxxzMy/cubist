@@ -22,8 +22,9 @@ from .hlsl import compile_shader, FULLSCREEN_VS
 class D3DDepthPost:
     """D3D12 深度后处理链（宿主 = D3DRenderer）。
 
-    纹理组（R32F res×res）：raw(输入) / dil / sl[2]（slope+gauss ping-pong）/
-    ema(时域状态) / depth(最终输出) / med_ring[4]（中值模式）。
+    纹理组（R32F res×res）：raw(输入) / dil(归一化输出，名字沿用) /
+    sl[2]（gauss ping-pong）/ ema(时域状态) / depth(最终输出) /
+    med_ring[4]（中值模式）。
     cbuffer 打包见 gpu/hlsl_depth.pack_consts（同布局）。
     """
 
@@ -107,14 +108,16 @@ class D3DDepthPost:
         dst.transition(ST_COMMON)
 
     # ---- 主链 ------------------------------------------------------------
-    def spatial_chain(self, lo, hi, aa_texels=3.0, aa_v=None, grow=0,
-                      close_px=0,
-                      slope_target=0.0, slope_m=0.0, iters=6,
+    def spatial_chain(self, lo, hi, aa_texels=3.0, aa_v=None,
                       temporal="ema", alpha=0.19, cut=False, stats=None,
                       color_tex=None, color_size=None, raw_tex=None,
                       raw_buf=None):
-        """执行完整空间+时域链：raw → normalize/dil → close → slope →
-        gauss h/v → EMA/中值 → depth。返回 depth Tex。
+        """执行完整空间+时域链：raw → normalize → gauss h/v → EMA/中值
+        → depth。返回 depth Tex。
+
+        （2026-11-23 删除膨胀/闭运算/坡度限幅三步：它们早已被废弃为 0，
+        且实测有害——膨胀把轮廓推出背景、坡度限幅让 seam 变差、闭运算
+        零影响；现在第一步只做 lo/hi → 显示带的线性映射。）
 
         aa_v: 垂直方向 σ（texel 空间）。默认 None = aa_texels×2/3（旧行为，
         供 parity/离线工具）；产品按当前每眼视口纵横比传值：深度 224² 被
@@ -128,8 +131,8 @@ class D3DDepthPost:
         raw_tex: 外部 raw 深度纹理（GPU 输出的推理结果）——给出时跳过
         upload+拷贝，直接拿它当链输入（省掉 CPU 往返与一拍流水）。
         """
-        from .hlsl_depth import (DIL_FS, ERO_FS, GAUSS_FS, MEDIAN_FS,
-                                 NORM_DIL_FS, PP_FS, PP_STATS_FS, SLOPE_FS)
+        from .hlsl_depth import (GAUSS_FS, MEDIAN_FS, NORM_FS,
+                                 NORM_STATS_FS, PP_FS, PP_STATS_FS)
         res = self.res
         self.ren.begin_frame()
         # 本帧显示用哪一张 depth 乒乓（与上一帧交替）
@@ -150,37 +153,17 @@ class D3DDepthPost:
             stats.record(_raw, cut=cut, color_tex=color_tex,
                          color_size=color_size)
 
-        # 1) normalize+dilate（生产：lo/hi 读 stats t7）
-        cur = self.dil
+        # 1) 区间归一化（生产：lo/hi 读 stats t7；只映射，不膨胀）
+        cur = self.dil          # 名字沿用：现在放的是归一化后的深度
         if stats is not None:
-            self._pass("dil_stats", NORM_DIL_FS, cur, [_raw],
-                       self._cb(res, w=grow,
-                                range_lo=stats.band_lo,
+            self._pass("norm_stats", NORM_STATS_FS, cur, [_raw],
+                       self._cb(res, range_lo=stats.band_lo,
                                 range_span=stats.band_span), stats=stats)
         else:
-            self._pass("dil", DIL_FS, cur, [_raw],
-                       self._cb(res, lo, hi, grow))
+            self._pass("norm", NORM_FS, cur, [_raw],
+                       self._cb(res, lo, hi))
 
-        # 2) 闭运算（可选）
-        if close_px and close_px > 0:
-            k = float(min(6, int(close_px)))
-            tmp = self.sl[0]
-            self._pass("close_max", DIL_FS, tmp, [cur], self._cb(res, 0, 1, k))
-            cur2 = self.sl[1]
-            self._pass("close_min", ERO_FS, cur2, [tmp],
-                       self._cb(res, 0, 0, 0, k=k))
-            cur = cur2
-
-        # 3) 坡度限幅（可选）
-        if slope_target > 0.0 and slope_m > 0.0:
-            cands = (self.dil, self.sl[0], self.sl[1])
-            for i in range(max(1, int(iters))):
-                dst = next(f for f in cands if f is not cur)
-                self._pass(f"slope{i}", SLOPE_FS, dst, [cur],
-                           self._cb(res, m=slope_m, target=slope_target))
-                cur = dst
-
-        # 4) 分离高斯 h/v（各向异性：水平 σ=AA / 垂直 ×2/3 —— 2026-11-20 定案）
+        # 2) 分离高斯 h/v（各向异性：水平 σ=AA / 垂直 ×2/3 —— 2026-11-20 定案）
         aa = aa_texels
         aa_y = (aa * (2.0 / 3.0)) if aa_v is None else float(aa_v)
         if aa and aa > 0.0:
@@ -194,7 +177,7 @@ class D3DDepthPost:
                                 sigma=aa_y, dirx=0.0, diry=1.0))
             cur = gv
 
-        # 5) 时域 EMA / 中值 W5（EMA/中值 pass 随主链同一列表录制——列表
+        # 3) 时域 EMA / 中值 W5（EMA/中值 pass 随主链同一列表录制——列表
         # 在 submit+wait 后才可 begin_frame 复用，顺序不可颠倒）
         # 首帧 alpha=1.0 直通（GL _first / CPU _ema_first 同语义：ema 状态
         # 未播种时 mix(prev=0, cur, 0.19) 会把首帧压到 19%）
