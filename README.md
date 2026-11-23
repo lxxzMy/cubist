@@ -9,7 +9,7 @@ Windows 10/11 · Direct3D 12 · DirectML，纯 GPU 零拷贝管线（采集纹�
 ## 能力
 
 - **输入**：整屏 DXGI Desktop Duplication（DDA），零拷贝共享纹理；可同时指定「采集屏」与「输出屏」（AB 屏分离，适合 AR 眼镜）。
-- **深度**：单目深度模型（ONNX）经 DirectML 推理，输入 224×224，输出 GPU 端直接进深度后处理链（归一化 / 保边 AA / 时域 EMA / 切镜检测）。
+- **深度**：单目深度模型（ONNX）经 DirectML 推理，输入尺寸随模型（224² / 384² / 448²，或 16:9 的 512×288 / 672×384），输出 GPU 端直接进深度后处理链（归一化 / 保边 AA / 时域 EMA / 切镜检测）。模型注册在 `D2S/model_catalog.py` 的 `LOCAL_MODELS`（文件 / 输入尺寸 / 预处理 / 直方图窗），加模型只需加一行；设置面板「深度模型」下拉可选（需把对应 ONNX 放进 `models/`）。
 - **输出格式**：
 
   | 格式 | 说明 |
@@ -56,7 +56,7 @@ DDA（IDXGIOutputDuplication）
 | 系统 | Windows 10 2004+ / Windows 11（依赖 D3D12 + DDA + DirectML） |
 | 显卡 | 支持 DirectX 12 的 GPU（DirectML 路径实测 NVIDIA GTX 1650 / RTX 2060） |
 | Python | 3.12（`D2S/python3` 为发布包内的可选便携运行时，不在仓库中） |
-| 模型 | `models/depth-224.onnx`（**已随仓库**，CC BY-NC 4.0，非商用） |
+| 模型 | 注册表支持 5 个：`depth-224.onnx`（**已随仓库**，CC BY-NC 4.0，非商用）、`depth-448.onnx`（同许可）、`zipdepth-384.onnx` / `zipdepth_wide_512x288.onnx` / `zipdepth_wide_672x384.onnx`（ZipDepth，MIT）；后四个不随仓库，放到 `models/` 或 `runtime/` 即可在面板里选 |
 | ONNX Runtime | `_toolchain/dl/ort-dml/`（onnxruntime.dll + DirectML.dll），或用 pip 安装 `onnxruntime-directml` |
 | 原生 DLL | `runtime/d3drender.dll`、`runtime/d2s_dml_shim.dll`（可由 `_toolchain/src` 构建） |
 

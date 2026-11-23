@@ -6,18 +6,46 @@
 """
 import os
 
+# ---------------------------------------------------------------------------
+# 本地 ONNX 模型注册表（唯一来源）——2026-11-24 收口
+# 几个模型只是三样东西不同：文件、输入尺寸 (W,H)、预处理方式；后面的管线
+# （prep → DML → 深度链 → 显示）完全一致。加模型 = 加一行。
+#   label      设置面板显示名
+#   file       ONNX 文件名（models/ 或 runtime/ 下）
+#   size       模型输入 (W, H)
+#   prep_norm  True：prep 做 ImageNet mean/std（模型要外部归一化）
+#              False：原样 0..1 RGB（mean/std 在 ONNX 图里，再归一化=双重标准化）
+#   raw_range  D3DStats 直方图窗（模型 raw 值域；P2/P98 在窗内取，窗外会饱和）
+#   license    权重许可（随包分发时写 NOTICE）
+# ---------------------------------------------------------------------------
+LOCAL_MODELS = {
+    "d224": dict(label="DepthART 224",
+                 file="depth-224.onnx", size=(224, 224),
+                 prep_norm=True, raw_range=(0.20, 5.40),
+                 license="CC BY-NC 4.0"),
+    "d448": dict(label="DepthART 448",
+                 file="depth-448.onnx", size=(448, 448),
+                 prep_norm=True, raw_range=(0.20, 8.00),
+                 license="CC BY-NC 4.0"),
+    "zip384": dict(label="ZipDepth 384",
+                   file="zipdepth-384.onnx", size=(384, 384),
+                   prep_norm=False, raw_range=(0.0, 1.0),
+                   license="MIT"),
+    "zipw512": dict(label="ZipDepth 宽屏 512×288",
+                    file="zipdepth_wide_512x288.onnx", size=(512, 288),
+                    prep_norm=False, raw_range=(0.0, 1.0),
+                    license="MIT"),
+    "zipw672": dict(label="ZipDepth 宽屏 672×384",
+                    file="zipdepth_wide_672x384.onnx", size=(672, 384),
+                    prep_norm=False, raw_range=(0.0, 1.0),
+                    license="MIT"),
+}
+
 # Model Mapping Dict
 MODEL_MAPPING = {
-    # 本地 ONNX 档位（由 depth.py 的 OrtDepthModel 加载）
-    # 本地 ONNX 档位（内部 id 保持中性）
-    "d224": "local/d224",
-    "d448": "local/d448",
-    # ZipDepth（ECCV 2026，6.1M 纯卷积，MIT）：EdgePad 384² ONNX 导出。
-    # 图内自带 ImageNet mean/std → prep 必须输出原样 0..1 RGB（见 PREP_RAW_MODELS）。
-    "zip384": "local/zip384",
-    # ZipDepth 宽屏（Nightfall 16:9 解码器微调，MIT）：非方形输入，见 MODEL_SIZES
-    "zipw512": "local/zipw512",     # 512×288
-    "zipw672": "local/zipw672",     # 672×384
+    # 本地 ONNX 档位：由注册表生成（内部 id = local/<key>）
+    **{k: f"local/{k}" for k in LOCAL_MODELS},
+    # 旧本地档位（未随包，保留映射兼容老 yaml）
     "m4s": "local/m4s",
     "m4m": "local/m4m",
     # 轻量蒸馏档（ViT-Tiny，约 6.2M 参数）。
@@ -112,63 +140,90 @@ MODEL_MAPPING = {
     "DepthPro-Large": "apple/DepthPro-hf"
 }
 
-# 这些模型的 mean/std 在 ONNX 图内，prep 不能再做 ImageNet 归一化（会双重标准化）
-PREP_RAW_MODELS = {"local/zip384", "local/zipw512", "local/zipw672"}
+# ---- 由注册表派生的兼容表（旧调用方仍按这些名字取）-----------------------
+# prep 不能做 ImageNet 归一化的模型（mean/std 在图内）
+PREP_RAW_MODELS = {f"local/{k}" for k, s in LOCAL_MODELS.items()
+                   if not s["prep_norm"]}
+# 输入尺寸 (W, H)；不在表里的模型按 Depth Resolution × 同值（方形）
+MODEL_SIZES = {f"local/{k}": tuple(s["size"]) for k, s in LOCAL_MODELS.items()}
+# D3DStats 直方图窗 (raw_lo, raw_hi)
+MODEL_RAW_RANGE = {f"local/{k}": tuple(s["raw_range"])
+                   for k, s in LOCAL_MODELS.items()}
 
-# 非方形模型的输入尺寸 (W, H)；不在表里的模型按 Depth Resolution × 同值（方形）
-MODEL_SIZES = {
-    "local/zip384": (384, 384),
-    "local/zipw512": (512, 288),
-    "local/zipw672": (672, 384),
-}
-
-# 本地可用的深度模型文件：显式 (Depth Model, Depth Resolution) -> runtime/ 文件名。
-# 文件名带分辨率后缀，禁止 basename 猜测（审阅阻断 6）。值为 None = 该组合未导出。
+# 本地模型文件：注册表生成 + 旧档位。键 (模型, 输入高)——老代码按
+# (Depth Model, Depth Resolution) 查；值为 None = 该组合未导出。
 DEPTH_MODEL_FILES = {
-    ("d224", 224): "depth-224.onnx",
-    ("d448", 448): "depth-448.onnx",
-    ("zip384", 384): "zipdepth-384.onnx",
-    ("zipw512", 288): "zipdepth_wide_512x288.onnx",
-    ("zipw672", 384): "zipdepth_wide_672x384.onnx",
+    **{(k, s["size"][1]): s["file"] for k, s in LOCAL_MODELS.items()},
     ("m4s", 448): "depth-m4s-448.onnx",
     ("m4m", 224): None,
     ("m4m", 448): "depth-m4m-448.onnx",
+    # 轻量蒸馏档：输出大=远（方向反），未进注册表/面板
     ("dt", 224): "depth-tiny-224.onnx",
 }
 
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _model_file_exists(fname):
+    return any(os.path.isfile(os.path.join(_ROOT, sub, fname))
+               for sub in ("models", "runtime"))
+
+
+def local_model_spec(key):
+    """注册表 key → spec dict；不在注册表返回 None。"""
+    return LOCAL_MODELS.get(key)
+
+
+def model_spec(model=None):
+    """当前模型的 spec：model 省略时读 utils.MODEL（经 globals 兜底）。"""
+    m = model if model is not None else globals().get("MODEL")
+    return LOCAL_MODELS.get(m)
+
+
+def available_local_models():
+    """注册表里有 ONNX 文件的档位 key 列表（设置面板下拉用，按注册顺序）。"""
+    return [k for k, s in LOCAL_MODELS.items() if _model_file_exists(s["file"])]
+
 
 def available_depth_models(resolution=None):
-    """当前 Depth Resolution 下有本地 ONNX 的模型名列表（设置界面下拉用）。
+    """当前 Depth Resolution 下有本地 ONNX 的模型名列表（旧接口，保留）。
 
-    在 MODEL/DEPTH_RESOLUTION 定义之前调用时只按显式 resolution 过滤。
+    注册表模型不再看 resolution（尺寸随模型走）；旧档位仍按显式
+    resolution 过滤。
     """
-    # 默认档位由 utils 的兼容包装注入（原实现读 utils.globals()）
     res = int(resolution) if resolution is not None else None
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     out = []
     for (m, r), fname in DEPTH_MODEL_FILES.items():
-        if fname is None:
+        if not fname:
             continue
-        if res is not None and r != res:
+        if m not in LOCAL_MODELS and res is not None and r != res:
             continue
-        if any(os.path.isfile(os.path.join(root, sub, fname))
-               for sub in ("models", "runtime")):
+        if _model_file_exists(fname):
             out.append(m)
     return out
 
 
 def resolve_depth_model_onnx(model=None, resolution=None):
-    """(Depth Model, Depth Resolution) -> runtime ONNX 绝对路径；无对应文件返回 None。"""
+    """模型 → ONNX 绝对路径（models/ 或 runtime/）；无文件返回 None。
+
+    注册表模型：文件随模型走，忽略 resolution（兼容老签名）；
+    旧档位：按 (model, resolution) 查 DEPTH_MODEL_FILES。
+    """
     m = model if model is not None else globals().get('MODEL')
     r = resolution if resolution is not None else globals().get('DEPTH_RESOLUTION')
-    if m is None or r is None:
+    if m is None:
         return None
-    fname = DEPTH_MODEL_FILES.get((m, int(r)))
+    spec = LOCAL_MODELS.get(m)
+    if spec is not None:
+        fname = spec["file"]
+    else:
+        if r is None:
+            return None
+        fname = DEPTH_MODEL_FILES.get((m, int(r)))
     if not fname:
         return None
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     for sub in ("models", "runtime"):
-        path = os.path.join(root, sub, fname)
+        path = os.path.join(_ROOT, sub, fname)
         if os.path.isfile(path):
             return path
     return None

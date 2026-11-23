@@ -727,6 +727,31 @@ class SettingsDialog(tk.Tk):
                                   width=280)
         self._mode_dd.grid(row=r, column=1, sticky="e", padx=(12, 0))
 
+        # 深度模型：注册表（model_catalog.LOCAL_MODELS）里有 ONNX 文件的档位。
+        # 各模型只是文件/输入尺寸/预处理不同，管线一致；保存后自重启生效。
+        self._models = []
+        self._model_dd = None
+        try:
+            import model_catalog as _mc
+            self._models = [(k, _mc.LOCAL_MODELS[k]["label"])
+                            for k in _mc.available_local_models()]
+        except Exception:
+            self._models = []
+        self._vars["Depth Model"] = tk.StringVar(value="d224")
+        if self._models:
+            try:
+                import utils as _u_m
+                _cur_m = str(_u_m.settings.get("Depth Model", "d224"))
+            except Exception:
+                _cur_m = "d224"
+            _mi = next((i for i, (_k, _l) in enumerate(self._models)
+                        if _k == _cur_m), 0)
+            self._vars["Depth Model"].set(self._models[_mi][0])
+            r = self._row(c4, "深度模型")
+            self._model_dd = _Dropdown(c4, [_l for _k, _l in self._models],
+                                       _mi, self._pick_model, width=280)
+            self._model_dd.grid(row=r, column=1, sticky="e", padx=(12, 0))
+
         # 推理显卡：仅 GL 回退/离线工具有意义（DML 零拷贝跨卡会退读回）。
         # D3D 主路径固定"跟随采集屏所在卡"（adapter.pick 自动匹配），
         # 不再暴露手动选卡——选了也没用，只会误导。
@@ -933,6 +958,12 @@ class SettingsDialog(tk.Tk):
         try:
             _m = self._modes[i][1]
             self._vars["Display Mode"].set(_m)
+        except Exception:
+            pass
+
+    def _pick_model(self, i):
+        try:
+            self._vars["Depth Model"].set(self._models[i][0])
         except Exception:
             pass
 
@@ -1213,13 +1244,21 @@ class SettingsDialog(tk.Tk):
                     break
         except Exception:
             pass
+        # 深度模型下拉对齐 yaml 当前值（注册表里没有文件的档位不列）
+        if getattr(self, "_model_dd", None) is not None:
+            _cm = str(self._vars["Depth Model"].get())
+            for i, (_k, _l) in enumerate(self._models):
+                if _k == _cm:
+                    self._model_dd._idx = i
+                    self._model_dd._paint()
+                    break
         self._sync_capture_choices()   # 采集屏下拉跟随输出屏（同卡过滤）
 
     def _collect(self):
         out = {}
-        # 模型与分辨率不随面板保存写入：面板里的下拉可能还是旧值，
-        # 一保存就会把用户手改到 yaml 的 448 覆盖回 224（实测踩过）。
-        _NO_SAVE = ("Depth Model", "Depth Resolution")
+        # Depth Model 随面板保存（"深度模型"下拉，加载时已对齐 yaml 当前值）；
+        # Depth Resolution 不写：注册表模型的尺寸随模型走，yaml 里那份是旧语义。
+        _NO_SAVE = ("Depth Resolution",)
         if getattr(self, "_is_d3d", False):
             # D3D 主路径自动跟随采集屏，保留 yaml 里的旧值（GL 回退仍可能用）
             _NO_SAVE += ("Inference GPU",)

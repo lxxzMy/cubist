@@ -119,10 +119,20 @@ USE_3D_MONITOR = False
 # Add for FrameGen
 LOSSLESS_SCALING_SUPPORT = False
 MODEL = settings["Depth Model"]
-MODEL_ID = MODEL_MAPPING[MODEL]
+MODEL_ID = MODEL_MAPPING.get(MODEL, f"local/{MODEL}")
 ALL_MODELS = settings["Model List"]
 CACHE_PATH = "./models"
+# 深度输入分辨率：注册表模型（model_catalog.LOCAL_MODELS）以模型自己的
+# (W, H) 为准（取高，兼容旧代码的"方形边长"语义）；yaml 的
+# "Depth Resolution" 只对不在注册表的旧档位生效。
 DEPTH_RESOLUTION = settings["Depth Resolution"]
+try:
+    from model_catalog import local_model_spec as _lms
+    _spec = _lms(MODEL)
+    if _spec is not None:
+        DEPTH_RESOLUTION = int(_spec["size"][1])
+except Exception:
+    pass
 DEVICE_ID = settings["Computing Device"]
 FP16 = settings["FP16"]
 # 推理后端：auto / cuda / tensorrt（TRT加速计划 §3.4：auto=有 TRT 运行时且

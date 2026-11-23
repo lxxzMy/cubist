@@ -1092,25 +1092,34 @@ def _resolve_capture_output(window):
     return False, out_i
 
 
-def _prep_normalize():
-    """prep 是否做 ImageNet 归一化：ZipDepth 等模型 mean/std 在图内 → False。"""
+def _model_spec():
+    """当前模型的注册表条目（model_catalog.LOCAL_MODELS）；取不到返回 None。
+
+    模型之间的全部差异（文件 / 输入尺寸 / 预处理 / 直方图窗）都在这一条里，
+    管线代码不认具体模型。
+    """
     try:
         import utils as _u
-        from model_catalog import PREP_RAW_MODELS
-        return str(_u.MODEL_MAPPING.get(_u.MODEL, "")) not in PREP_RAW_MODELS
+        from model_catalog import model_spec
+        return model_spec(_u.MODEL)
     except Exception:
-        return True
+        return None
+
+
+def _prep_normalize():
+    """prep 是否做 ImageNet 归一化：注册表 prep_norm（ZipDepth 等图内自带
+    mean/std 的模型为 False）；不在注册表缺省 True。"""
+    s = _model_spec()
+    return bool(s["prep_norm"]) if s is not None else True
 
 
 def _model_size():
-    """模型输入 (W, H)：非方形模型查 model_catalog.MODEL_SIZES；其余方形 =
-    Depth Resolution × 同值。"""
+    """模型输入 (W, H)：注册表给；不在注册表按 Depth Resolution × 同值（方形）。"""
+    s = _model_spec()
+    if s is not None:
+        return tuple(s["size"])
     try:
         import utils as _u
-        from model_catalog import MODEL_SIZES
-        mid = str(_u.MODEL_MAPPING.get(_u.MODEL, ""))
-        if mid in MODEL_SIZES:
-            return MODEL_SIZES[mid]
         r = int(_u.DEPTH_RESOLUTION)
         return (r, r)
     except Exception:
@@ -1118,9 +1127,13 @@ def _model_size():
 
 
 def _stats_range():
-    """D3DStats 直方图窗（raw 值域）：ZipDepth 相对逆深度 ≈0~0.2 → 0~1；
-    其它沿用默认（DepthART 0.20~5.40）。"""
-    return {} if _prep_normalize() else dict(raw_lo=0.0, raw_hi=1.0)
+    """D3DStats 直方图窗（raw 值域）：注册表 raw_range；不在注册表用
+    DepthART 口径 0.20~5.40。"""
+    s = _model_spec()
+    if s is not None:
+        lo, hi = s["raw_range"]
+        return dict(raw_lo=float(lo), raw_hi=float(hi))
+    return dict(raw_lo=0.20, raw_hi=5.40)
 
 
 def _main_d3d(mode="Viewer"):
