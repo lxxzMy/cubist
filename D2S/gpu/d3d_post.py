@@ -108,16 +108,16 @@ class D3DDepthPost:
         dst.transition(ST_COMMON)
 
     # ---- 主链 ------------------------------------------------------------
-    def spatial_chain(self, lo, hi, aa_texels=3.0, aa_v=None,
+    def spatial_chain(self, lo, hi, aa_texels=3.0, aa_v=None, grow=0,
                       temporal="ema", alpha=0.19, cut=False, stats=None,
                       color_tex=None, color_size=None, raw_tex=None,
                       raw_buf=None):
-        """执行完整空间+时域链：raw → normalize → gauss h/v → EMA/中值
-        → depth。返回 depth Tex。
+        """执行完整空间+时域链：raw → [可选 dilate] → normalize →
+        gauss h/v → EMA/中值 → depth。返回 depth Tex。
 
-        （2026-11-23 删除膨胀/闭运算/坡度限幅三步：它们早已被废弃为 0，
-        且实测有害——膨胀把轮廓推出背景、坡度限幅让 seam 变差、闭运算
-        零影响；现在第一步只做 lo/hi → 显示带的线性映射。）
+        grow: 13×13 max 膨胀半径（texel，独立 pass，默认 0=关）。实测膨胀
+        会把轮廓推出背景（漂移 13.9→26px），所以默认关，留作开关。
+        （2026-11-23：坡度限幅、闭运算已删除；膨胀拆成独立可选 pass。）
 
         aa_v: 垂直方向 σ（texel 空间）。默认 None = aa_texels×2/3（旧行为，
         供 parity/离线工具）；产品按当前每眼视口纵横比传值：深度 224² 被
@@ -131,7 +131,7 @@ class D3DDepthPost:
         raw_tex: 外部 raw 深度纹理（GPU 输出的推理结果）——给出时跳过
         upload+拷贝，直接拿它当链输入（省掉 CPU 往返与一拍流水）。
         """
-        from .hlsl_depth import (GAUSS_FS, MEDIAN_FS, NORM_FS,
+        from .hlsl_depth import (DIL_FS, GAUSS_FS, MEDIAN_FS, NORM_FS,
                                  NORM_STATS_FS, PP_FS, PP_STATS_FS)
         res = self.res
         self.ren.begin_frame()
@@ -153,17 +153,26 @@ class D3DDepthPost:
             stats.record(_raw, cut=cut, color_tex=color_tex,
                          color_size=color_size)
 
-        # 1) 区间归一化（生产：lo/hi 读 stats t7；只映射，不膨胀）
-        cur = self.dil          # 名字沿用：现在放的是归一化后的深度
+        # 1) 可选膨胀（默认关）：raw 域 13×13 max → self.dil
+        src = _raw
+        if grow and int(grow) > 0:
+            self._pass("dil", DIL_FS, self.dil, [_raw],
+                       self._cb(res, 0.0, 1.0, float(min(6, int(grow)))))
+            src = self.dil
+
+        # 2) 区间归一化（生产：lo/hi 读 stats t7；只映射）
+        #    目标不能与 src 同一张：膨胀开着时 src=dil → 归一化写 sl[0]；
+        #    关着时 src=raw → 写 dil（名字沿用：现在放的是归一化后的深度）
+        cur = self.sl[0] if src is self.dil else self.dil
         if stats is not None:
-            self._pass("norm_stats", NORM_STATS_FS, cur, [_raw],
+            self._pass("norm_stats", NORM_STATS_FS, cur, [src],
                        self._cb(res, range_lo=stats.band_lo,
                                 range_span=stats.band_span), stats=stats)
         else:
-            self._pass("norm", NORM_FS, cur, [_raw],
+            self._pass("norm", NORM_FS, cur, [src],
                        self._cb(res, lo, hi))
 
-        # 2) 分离高斯 h/v（各向异性：水平 σ=AA / 垂直 ×2/3 —— 2026-11-20 定案）
+        # 3) 分离高斯 h/v（各向异性：水平 σ=AA / 垂直 ×2/3 —— 2026-11-20 定案）
         aa = aa_texels
         aa_y = (aa * (2.0 / 3.0)) if aa_v is None else float(aa_v)
         if aa and aa > 0.0:
@@ -177,7 +186,7 @@ class D3DDepthPost:
                                 sigma=aa_y, dirx=0.0, diry=1.0))
             cur = gv
 
-        # 3) 时域 EMA / 中值 W5（EMA/中值 pass 随主链同一列表录制——列表
+        # 4) 时域 EMA / 中值 W5（EMA/中值 pass 随主链同一列表录制——列表
         # 在 submit+wait 后才可 begin_frame 复用，顺序不可颠倒）
         # 首帧 alpha=1.0 直通（GL _first / CPU _ema_first 同语义：ema 状态
         # 未播种时 mix(prev=0, cur, 0.19) 会把首帧压到 19%）

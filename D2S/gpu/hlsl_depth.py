@@ -63,10 +63,37 @@ float4 PSMain(VOut i) : SV_Target {
 """
 
 # ---------------------------------------------------------------------------
+# 可选：13×13 max 膨胀（独立 pass，默认关；settings "Depth Grow (px)" 打开）
+# 在 raw 域做 max 滤波，再做归一化（max 与单调仿射映射可交换，与原
+# 融合实现 NORM_DIL_FS 等价）。实测膨胀会把轮廓推出背景，故默认 0。
+# ---------------------------------------------------------------------------
+DIL_FS = """
+Texture2D tex_raw : register(t0);
+SamplerState samp : register(s0);
+cbuffer CB : register(b0) { float4 P[16]; };
+
+struct VOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
+
+float4 PSMain(VOut i) : SV_Target {
+    float2 uv = i.uv;
+    float res = P[0].x;
+    float grow = P[0].w;
+    float best = -1.0;
+    for (int dy = -6; dy <= 6; ++dy) {
+        for (int dx = -6; dx <= 6; ++dx) {
+            if (abs((float)dx) > grow || abs((float)dy) > grow) continue;
+            best = max(best, tex_raw.SampleLevel(samp,
+                uv + float2((float)dx, (float)dy) / res, 0).r);
+        }
+    }
+    return float4(best, 0.0, 0.0, 1.0);
+}
+"""
+
+# ---------------------------------------------------------------------------
 # 区间归一化（lo/hi 由 cbuffer 传入；生产用 NORM_STATS_FS 从 stats 读）。
-# 只做 lo/hi → 显示带的线性映射：不再做 13×13 膨胀、闭运算、坡度限幅
-# （2026-11-23 定案删除——三步早已废弃为 0，且实测有害：膨胀把轮廓推出
-#   背景、坡度限幅让 seam 变差、闭运算零影响）
+# 只做 lo/hi → 显示带的线性映射；闭运算与坡度限幅已删除，膨胀拆成上面
+# 的独立可选 pass（2026-11-23）
 # ---------------------------------------------------------------------------
 NORM_FS = """
 Texture2D tex_raw : register(t0);

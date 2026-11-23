@@ -131,7 +131,8 @@ except Exception:
 import _stdio
 _stdio.ensure()
 
-from utils import (FULLSCREEN_OUTPUT, OS_NAME, OUTPUT_RESOLUTION, DISPLAY_MODE, MONITOR_INDEX, SHOW_FPS, XR_PREVIEW_WINDOW, CROP_MODE, FPS, WINDOW_TITLE, CONVERGENCE, RUN_MODE, LOSSLESS_SCALING_SUPPORT, USE_3D_MONITOR, FILL_16_9, FIX_VIEWER_ASPECT, CAPTURE_MODE, STEREO_DISPLAY_SELECTION, STEREO_DISPLAY_INDEX, shutdown_event, CONTROLLER_MODEL, ENVIRONMENT_MODEL, VSYNC, INTERLEAVE_PHASE, PARALLAX_PX, PARALLAX_CURVE, DEPTH_UPSAMPLER, AA_STRENGTH, DIBR_EDGE_SNAP, DEPTH_RELIEF, DIBR_WARP_ITERATIONS, DISOCLUSION_FILL, CURSOR_MODE, SAME_SCREEN, CAPTURE_MONITOR_INDEX)
+from utils import (FULLSCREEN_OUTPUT, OS_NAME, OUTPUT_RESOLUTION, DISPLAY_MODE, MONITOR_INDEX, SHOW_FPS, XR_PREVIEW_WINDOW, CROP_MODE, FPS, WINDOW_TITLE, CONVERGENCE, RUN_MODE, LOSSLESS_SCALING_SUPPORT, USE_3D_MONITOR, FILL_16_9, FIX_VIEWER_ASPECT, CAPTURE_MODE, STEREO_DISPLAY_SELECTION, STEREO_DISPLAY_INDEX, shutdown_event, CONTROLLER_MODEL, ENVIRONMENT_MODEL, VSYNC, INTERLEAVE_PHASE, PARALLAX_PX, PARALLAX_CURVE, DEPTH_UPSAMPLER, AA_STRENGTH, DIBR_EDGE_SNAP, DEPTH_RELIEF, DIBR_WARP_ITERATIONS, DISOCLUSION_FILL, CURSOR_MODE, SAME_SCREEN, CAPTURE_MONITOR_INDEX,
+DEPTH_GROW)
 from depth import process
 import depth as _depth_mod   # 深度 EMA/参数的运行时热改入口
 
@@ -1635,7 +1636,7 @@ def _main_d3d(mode="Viewer"):
                   f"{'%dx%d' % _vp[2:4] if _vp else '?'}）", flush=True)
         window.post.upload_raw(raw)
         window.post.spatial_chain(
-            0.0, 0.0, aa_texels=_aa_h, aa_v=_aa_v,
+            0.0, 0.0, aa_texels=_aa_h, aa_v=_aa_v, grow=DEPTH_GROW,
             temporal="ema", alpha=alpha, cut=True, stats=cap["stats"],
             color_tex=src, color_size=cap["zcc"].size)
         _ema_first = False
@@ -1924,7 +1925,7 @@ def _main_d3d(mode="Viewer"):
                 _alpha = 1.0
             _ah, _av = _pl_aa()
             window.post.spatial_chain(
-                0.0, 0.0, aa_texels=_ah, aa_v=_av,
+                0.0, 0.0, aa_texels=_ah, aa_v=_av, grow=DEPTH_GROW,
                 temporal="ema", alpha=_alpha, cut=True, stats=_st,
                 color_tex=_src, color_size=cap["zcc"].size)
             _ema_first = False
@@ -1963,7 +1964,7 @@ def _main_d3d(mode="Viewer"):
                     _alpha = 1.0
                 _ah, _av = _pl_aa()
                 window.post.spatial_chain(
-                    0.0, 0.0, aa_texels=_ah, aa_v=_av,
+                    0.0, 0.0, aa_texels=_ah, aa_v=_av, grow=DEPTH_GROW,
                     temporal="ema", alpha=_alpha, cut=True, stats=_st,
                     color_tex=_src, color_size=cap["zcc"].size,
                     raw_buf=_pl["raw_buf"])

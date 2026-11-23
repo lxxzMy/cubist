@@ -17,8 +17,8 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 os.environ["PATH"] = os.path.join(ROOT, "runtime") + os.pathsep + os.environ.get("PATH", "")
 
 from gpu.hlsl import compile_shader, FULLSCREEN_VS  # noqa: E402
-from gpu.hlsl_depth import (GAUSS_FS, MEDIAN_FS, NORM_FS, NORM_STATS_FS,  # noqa: E402
-                            PP_FS, PP_STATS_FS, PREP_FS)
+from gpu.hlsl_depth import (DIL_FS, GAUSS_FS, MEDIAN_FS, NORM_FS,  # noqa: E402
+                            NORM_STATS_FS, PP_FS, PP_STATS_FS, PREP_FS)
 from gpu.hlsl_display import (DEPTH_MAP_FS, DIBR_FS, INTERLEAVED_FS,  # noqa: E402
                               PASSTHROUGH_FS)
 
@@ -36,7 +36,8 @@ def main():
 
     # X1 全 shader 编译
     shaders = [
-        ("depth_prep", PREP_FS, "ps"), ("depth_norm", NORM_FS, "ps"),
+        ("depth_prep", PREP_FS, "ps"), ("depth_dil", DIL_FS, "ps"),
+        ("depth_norm", NORM_FS, "ps"),
         ("depth_norm_stats", NORM_STATS_FS, "ps"),
         ("depth_gauss", GAUSS_FS, "ps"), ("depth_ema_pp", PP_FS, "ps"),
         ("depth_median", MEDIAN_FS, "ps"),

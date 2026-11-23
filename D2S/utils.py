@@ -278,8 +278,11 @@ EDGE_FALLOFF = 0.0 if str(_ef).strip().lower() in ("false", "0", "no") else 0.01
 TOGGLE_HOTKEY = str(settings.get("Toggle Hotkey", "ctrl+f2")).strip().lower()
 if TOGGLE_HOTKEY not in ("ctrl+f2", "pause", "scrolllock", "f10", "ctrl+f10"):
     TOGGLE_HOTKEY = "ctrl+f2"
-# （2026-11-23 删除 DEPTH_GROW / DEPTH_SLOPE_LIMIT / DEPTH_CLOSE：膨胀、
-#   坡度限幅、闭运算三步已从深度链整体移除，相关设置键一并删除。）
+# 2026-11-23 深度链精简：坡度限幅（DEPTH_SLOPE_LIMIT）、闭运算（DEPTH_CLOSE）
+# 已整体删除；13×13 max 膨胀保留为**独立可选 pass**（默认关），需要时可在
+# settings.yaml 里设 "Depth Grow (px)" 打开（raw 域先膨胀再归一化）。
+# 注意：实测膨胀会把轮廓推出背景（漂移 13.9→26px），默认 0。
+DEPTH_GROW = int(settings.get("Depth Grow (px)", 0) or 0)
 # ParallaxRT-style silhouette handling (ported from dibr_renderer_cuda.cu):
 #   edge snap  - at a strong depth edge, pull the rim pixel's depth onto the
 #                background side so it stops sampling across the layer
