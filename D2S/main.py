@@ -1126,6 +1126,27 @@ def _model_size():
         return (224, 224)
 
 
+def _aa_sigma_texels(res_w, res_h, vp, base):
+    """高斯 AA 的 (横向 σ, 纵向 σ)，单位 = 深度纹素。
+
+    面板值 base = 【两个方向里较大的 σ】（用户定案）。另一方向按"屏幕空间
+    各向同性"缩小：深度 W×H 拉伸到每眼视口 vp=(x, y, w, h) 后
+        σ_h·w/W = σ_v·h/H  →  σ_h/σ_v = (W/H)/(w/h)
+    横向 σ 更大（或两轴相同）→ σ_h = base、σ_v = base·(w/h)/(W/H)；反之对调。
+      方形模型 + 16:9 视口        → (base/1.778, base)
+      方形模型 + Half-SBS 非Fill   → (base, base·0.889)
+      16:9 模型 + 16:9 视口        → (base, base)
+      16:9 模型 + Half-SBS 非Fill  → (base, base/2)
+    （2026-11-24 修正：此前先按 224 尺度取值再乘分辨率比例，宽屏模型上
+    较大方向成了 base·H/224 而不是面板值。）
+    """
+    r_ar = float(res_w) / max(1.0, float(res_h))
+    v_ar = float(vp[2]) / max(1.0, float(vp[3]))
+    if r_ar >= v_ar:
+        return base, base * (v_ar / r_ar)
+    return base * (r_ar / v_ar), base
+
+
 def _main_d3d(mode="Viewer"):
     """D3D12 产品主循环（Cubist-1.1-d3d 主路径；GL 回退 D2S_RENDER=gl）。
 
@@ -1645,16 +1666,9 @@ def _main_d3d(mode="Viewer"):
                            time.perf_counter()) if _smooth != "off" else 1.0)
         if _ema_first:
             alpha = 1.0
-        # aa = 旋钮值 = 【较大方向的 σ】。深度 W×H 拉伸到每眼视口后，屏幕空间
-        # 各向同性要求：V = base·H/224，H = base·W/224·(vp_h/vp_w)。
-        #   方形模型（W==H）时就是旧公式 V=aa、H=aa·(vp_h/vp_w)：
-        #   16:9 → H=aa/1.778；Half-SBS 非Fill 每眼 960×1080 → H=aa·0.889。
-        #   16:9 宽屏模型（W/H ≈ 视口比）texel 在屏幕上本就各向同性 → 两轴相等。
+        # aa：面板值 = 【较大方向的 σ】（纹素），另一方向按每眼视口纵横比
+        # 缩小（屏幕空间各向同性）——公式与各模式下的取值见 _aa_sigma_texels
         base = (float(getattr(_depth_mod, "AA_STRENGTH", 0.0)) * 0.5)
-        _rw = int(getattr(window, "_res_w", 224))
-        _rh = int(getattr(window, "_res_h", 224))
-        aa_v = base * (_rh / 224.0)
-        aa_h = base * (_rw / 224.0)
         _m = getattr(window, "_mode", "interleaved")
         _sw, _sh = cap["zcc"].size
         try:
@@ -1662,13 +1676,11 @@ def _main_d3d(mode="Viewer"):
                 _vp = window.disp.sbs_viewports(_m, _sw, _sh)[0]
             else:
                 _vp = window.disp.single_viewport(_sw, _sh)
-            _ar = float(_vp[2]) / max(1.0, float(_vp[3]))
-            if _ar >= 1.0:
-                _aa_h, _aa_v = aa_h / _ar, aa_v
-            else:
-                _aa_h, _aa_v = aa_h, aa_v * _ar
+            _aa_h, _aa_v = _aa_sigma_texels(
+                int(getattr(window, "_res_w", 224)),
+                int(getattr(window, "_res_h", 224)), _vp, base)
         except Exception:
-            _vp, _aa_h, _aa_v = None, aa_v, aa_v
+            _vp, _aa_h, _aa_v = None, base, base
         _aa_key = (round(_aa_h, 3), round(_aa_v, 3))
         if globals().get("_aa_key_last") != _aa_key:
             globals()["_aa_key_last"] = _aa_key
@@ -1871,13 +1883,9 @@ def _main_d3d(mode="Viewer"):
     _pl_ticked = [False]      # 本拍是否已由 idle 分支推进（防重复 tick）
 
     def _pl_aa():
-        """当前每眼视口的各向异性 σ（与 _process 同口径）：V = base·H/224，
-        H = base·W/224·(vp_h/vp_w)；方形模型时与旧公式逐位相同。"""
+        """当前每眼视口的 (横向 σ, 纵向 σ)（纹素；与 _process 同口径，
+        见 _aa_sigma_texels）。"""
         base = (float(getattr(_depth_mod, "AA_STRENGTH", 0.0)) * 0.5)
-        _rw = int(getattr(window, "_res_w", 224))
-        _rh = int(getattr(window, "_res_h", 224))
-        aa_v = base * (_rh / 224.0)
-        aa_h = base * (_rw / 224.0)
         _m = getattr(window, "_mode", "interleaved")
         _sw, _sh = cap["zcc"].size
         try:
@@ -1885,10 +1893,11 @@ def _main_d3d(mode="Viewer"):
                 _vp = window.disp.sbs_viewports(_m, _sw, _sh)[0]
             else:
                 _vp = window.disp.single_viewport(_sw, _sh)
-            _ar = float(_vp[2]) / max(1.0, float(_vp[3]))
-            return (aa_h / _ar, aa_v) if _ar >= 1.0 else (aa_h, aa_v * _ar)
+            return _aa_sigma_texels(int(getattr(window, "_res_w", 224)),
+                                    int(getattr(window, "_res_h", 224)),
+                                    _vp, base)
         except Exception:
-            return aa_v, aa_v
+            return base, base
 
     def _tick_pipeline(idx):
         """流水线一拍（idx=-1 表示这一拍没有新采集帧）。
@@ -2953,8 +2962,9 @@ def main(mode="Viewer"):
                 smooth = str(getattr(_depth_mod, "DEPTH_SMOOTHING", "ema"))
                 alpha = (ema_alpha(float(_depth_mod.DEPTH_SMOOTHING_FRAMES), _perf())
                          if smooth != "off" else 1.0)
-                aa = (float(getattr(_depth_mod, "AA_STRENGTH", 0.0)) * 0.5
-                      * (int(_depth_mod.DEPTH_RESOLUTION) / 224.0))
+                # GL 链只有一个 σ（纹素）= 面板值（"较大方向的 σ"；GL 路径不按
+                # 视口做各向异性）
+                aa = float(getattr(_depth_mod, "AA_STRENGTH", 0.0)) * 0.5
                 if rich:
                     _t_post0 = _perf()
                 # MC-EMA：postprocess 前跑运动补偿步（D2S_MC=0 关闭走旧路径）

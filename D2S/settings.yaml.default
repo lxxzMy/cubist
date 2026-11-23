@@ -320,7 +320,6 @@ Model List:
     - 1536
 Depth Resolution: 224
 Depth Map Stage: Final
-Anti-aliasing: 3
 Foreground Scale: 0
 Convergence Tau: 2.0
 Convergence Bias: 0.0

@@ -188,7 +188,13 @@ FPS = get_fps(WINDOW_TITLE, MONITOR_INDEX)
 
 # Image Processing Parameters
 FOREGROUND_SCALE = settings["Foreground Scale"] / 10 # 0-10
-AA_STRENGTH = settings["Anti-aliasing"] * 2
+# 高斯 AA 的 σ：两个方向里较大的那个，单位 = 深度纹素（另一方向按每眼视口
+# 纵横比缩小，见 main._aa_sigma_texels）。2026-11-24 用户定案 1（原 3）。
+# 「画质」卡片已整块隐藏，这是产品定值：**不读 yaml 的 "Anti-aliasing"**——
+# 旧实例/旧配置里残留的 3 会在升级后悄悄沿用。开发/对比实验用环境变量
+# D2S_AA_KNOB 临时改。
+AA_KNOB = float(os.environ.get("D2S_AA_KNOB", "1") or 1)
+AA_STRENGTH = AA_KNOB * 2
 
 # Experimental Settings
 

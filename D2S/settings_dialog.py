@@ -245,7 +245,6 @@ ICON_PATH = os.path.join(HERE, "icon.ico")
 _EDID_CACHE = [None]
 
 LIVE_KEYS = ("Parallax (px)", "Convergence Bias",
-             "Anti-aliasing",
              "Show FPS", "VSync", "Interleave Phase")
 
 BG = "#0B1220"
@@ -695,10 +694,10 @@ class SettingsDialog(tk.Tk):
         # 变量仅为 yaml 兼容保留
         self._vars["Convergence Tau"] = tk.DoubleVar(value=2.0)
 
-        # 「画质」卡片已整块隐藏：里面的抗锯齿/平滑帧数都已定值，没有可调项
-        # 抗锯齿固定 3：语义是【两个方向里较大的 σ】（横屏→竖向=3），
-        # 另一方向按每眼视口纵横比自动缩小（16:9 → 横向 1.69）
-        self._vars["Anti-aliasing"] = tk.IntVar(value=3)
+        # 「画质」卡片已整块隐藏：里面的抗锯齿/平滑帧数都是产品定值，没有可调项。
+        # 抗锯齿 σ 是代码里定死的（utils.AA_KNOB，2026-11-24 用户定案 1；语义 =
+        # 【两个方向里较大的 σ】，单位深度纹素，另一方向按每眼视口纵横比缩小，
+        # 公式见 main._aa_sigma_texels），不读也不写 yaml。
         # 深度 EMA 时间常数已定死 80ms（utils 常量），面板不再暴露
 
 
@@ -1231,8 +1230,7 @@ class SettingsDialog(tk.Tk):
                 continue
             v = var.get()
             if key in ("Depth Resolution", "Parallax (px)", "Monitor Index",
-                       "Capture Monitor Index",
-                       "Anti-aliasing"):
+                       "Capture Monitor Index"):
                 out[key] = int(v)
             elif key == "Cursor Scale":
                 out[key] = round(float(v), 2)
