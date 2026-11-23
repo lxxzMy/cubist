@@ -21,6 +21,8 @@ from gpu.hlsl_depth import (DIL_FS, GAUSS_FS, MEDIAN_FS, NORM_FS,  # noqa: E402
                             NORM_STATS_FS, PP_FS, PP_STATS_FS, PREP_FS)
 from gpu.hlsl_display import (DEPTH_MAP_FS, DIBR_FS, INTERLEAVED_FS,  # noqa: E402
                               PASSTHROUGH_FS)
+from gpu.hlsl_stats import (ANCHOR_CS, HIST_CS, MINMAX_CS, QUANT_CS,  # noqa: E402
+                            RGB_HIST_CS, ZERO_CS)
 
 
 def main():
@@ -71,6 +73,28 @@ def main():
         print(f"[X3] 缓存命中 OK（{c2.nbytes}B {c2.compiler}）", flush=True)
     except Exception as e:
         fails.append(f"X3 缓存: {e}")
+
+    # X1c 判据链 compute shader（只验编译；PSO 创建与实际执行由
+    # tools/v2_stats_smoke.py 覆盖）
+    cs_shaders = [
+        ("stats_zero", ZERO_CS), ("stats_minmax", MINMAX_CS),
+        ("stats_hist", HIST_CS), ("stats_rgb", RGB_HIST_CS),
+        ("stats_quant", QUANT_CS), ("stats_anchor", ANCHOR_CS),
+    ]
+    ok_cs = 0
+    for name, src in cs_shaders:
+        try:
+            c = compile_shader(name, src, "cs", force=True)
+            if c.compiler != "dxc":
+                fails.append(f"X1c {name} 走了 {c.compiler} 而非 dxc")
+            elif b"DXIL" not in bytes(c._copy):
+                fails.append(f"X1c {name} 无 DXIL chunk")
+            else:
+                ok_cs += 1
+        except Exception as e:
+            fails.append(f"X1c {name}: {type(e).__name__}: {e}")
+    print(f"[X1c] {ok_cs}/{len(cs_shaders)} 判据链 compute shader dxc 编译成功",
+          flush=True)
 
     # X2 PSO（debug layer）
     from gpu import d3drender as dr

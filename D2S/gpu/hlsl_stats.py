@@ -2,21 +2,24 @@
 """GPU 判据链 HLSL（V2）：raw 深度 → 直方图 → 分位数/Otsu 锚；RGB 切变。
 
 数据流（全部 compute，链 shader 直读 stats buffer）：
-  hist_cs : raw(R32F Texture2D) → hist[256] uint（atomic）
-  quant_cs: hist → stats[0]=lo(P2 值域) stats[1]=hi(P98)
-            stats[2]=近峰中位（Otsu 分裂近类中位，收敛锚）
+  minmax_cs : raw（::4 子采样域）→ range[2] = 本帧 min/max（直方图量程）
+  hist_cs   : raw 按 [range.min, range.max] 分 256 bin → hist[256] uint（atomic）
+  quant_cs  : hist → stats[0]=lo(P2 值域) stats[1]=hi(P98)
+             stats[2]=近峰中位（Otsu 分裂近类中位，收敛锚）
   rgb_hist_cs: 颜色 4096-bin(16³) 直方图 TV → stats[8]（遥测）/[9]（cut 决策）
                /[10]（自适应阈值）；thr = max(0.40, mean+3σ) 30 帧窗 + 最小场景长 15
 
 stats buffer：uint[8]（StructuredBuffer/RWStructuredBuffer，stride 4）。
   [4] = P50（归一化域，本帧原始值；收敛面直取，无 EMA）
 范围更新模式 P[2].w：1=percentile（默认，每帧快照 P2/P98→[0.02,0.98]）
-                    2=ratchet 0=lerp（α 平滑，调试用）
+                    2=ratchet 0=lerp（α 平滑，调试用）5=decile
 **注意**：D3D12 runtime 拒收 raw（ByteAddressBuffer）视图——strided 0 的
 UAV/SRV 会把设备置 invalid-call，故一律用 structured 视图。
-值域：raw ∈ [raw_lo, raw_hi]（P[0].x/.y，d224 固定区间 0.20~5.40）。
-cbuffer：P[0]=(raw_lo, raw_hi, full_res, cut_res_eff)，
-         P[1]=(sub_res, sample_step, 0, range_alpha)，
+值域：直方图量程 = **每帧 raw 的 min/max**（range 缓冲，minmax_cs 写，
+2026-11-24 起）。此前是按模型手填的固定区间（d224 0.20~5.40）：太短会让
+越界样本挤进末格、P98 顶死在区间端点；太长则数据只占少数 bin、分位变粗。
+cbuffer：P[0] 预留（量程不在 cbuffer 里，在 range 缓冲），
+         P[1]=(sub_res, sample_step, sub_h, range_alpha)，
          P[2]=(0, range_lo, range_span, range_mode: 2=棘轮 1=percentile 0=lerp)
          （与 depth_norm ::4 域对齐；扩张/收缩共用 range_alpha；
           归一化映射到 [range_lo, range_lo+range_span] = [0.02, 0.98]）
@@ -38,9 +41,64 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
 }
 """
 
-# 直方图：::4 子采样（对齐 depth_norm.percentile_stats 的采样域），atomic 累加
+# 量程：本帧 raw 的 min/max（::4 域，与直方图同一批样本）→ range[2]。
+# 单 group 256 线程跨步归约（无原子、无初值依赖）；float 先映射到全序 uint
+# 再比较（负数取反、非负数置符号位，支持负值），NaN 样本跳过；写回的是
+# 原始 float 位模式（hist/quant 直接 asfloat）。
+MINMAX_CS = """
+Texture2D<float> tex_raw : register(t0);
+RWStructuredBuffer<uint> uav_range : register(u0);
+cbuffer CB : register(b0) { float4 P[16]; };
+
+groupshared uint g_mn[256];
+groupshared uint g_mx[256];
+
+uint ord(float v) {
+    uint i = asuint(v);
+    return (i & 0x80000000u) ? ~i : (i | 0x80000000u);
+}
+uint unord(uint o) {
+    return (o & 0x80000000u) ? (o & 0x7FFFFFFFu) : ~o;
+}
+
+[numthreads(256, 1, 1)]
+void CSMain(uint3 tid : SV_DispatchThreadID) {
+    uint t = tid.x;
+    uint sub = (uint)P[1].x;
+    uint sub_h = (P[1].z > 0.5) ? (uint)P[1].z : sub;
+    uint step = (uint)P[1].y;
+    uint total = sub * sub_h;
+    uint mn = 0xFFFFFFFFu, mx = 0u;      // 全序域的两端（±NaN）
+    for (uint idx = t; idx < total; idx += 256) {
+        uint sx = idx % sub, sy = idx / sub;
+        float v = tex_raw.Load(int3((int)(sx * step), (int)(sy * step), 0));
+        if (isnan(v)) continue;
+        uint o = ord(v);
+        mn = min(mn, o);
+        mx = max(mx, o);
+    }
+    g_mn[t] = mn;
+    g_mx[t] = mx;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint s = 128; s > 0; s >>= 1) {
+        if (t < s) {
+            g_mn[t] = min(g_mn[t], g_mn[t + s]);
+            g_mx[t] = max(g_mx[t], g_mx[t + s]);
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (t == 0) {
+        uav_range[0] = unord(g_mn[0]);
+        uav_range[1] = unord(g_mx[0]);
+    }
+}
+"""
+
+# 直方图：::4 子采样（对齐 depth_norm.percentile_stats 的采样域），atomic 累加。
+# 分格区间 = range 缓冲（本帧 min/max，minmax_cs 先写）——cbuffer 里不再有量程
 HIST_CS = """
 Texture2D<float> tex_raw : register(t0);
+StructuredBuffer<uint> g_range : register(t1);
 RWStructuredBuffer<uint> uav_out : register(u0);
 cbuffer CB : register(b0) { float4 P[16]; };
 
@@ -51,7 +109,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
     uint sub_h = (P[1].z > 0.5) ? (uint)P[1].z : sub;
     uint step = (uint)P[1].y;
     if (tid.x >= sub || tid.y >= sub_h) return;
-    float lo = P[0].x, hi = P[0].y;
+    float lo = asfloat(g_range[0]), hi = asfloat(g_range[1]);
     float v = tex_raw.Load(int3((int)(tid.x * step), (int)(tid.y * step), 0));
     float t = saturate((v - lo) / max(1e-6, hi - lo));
     uint bin = min((uint)(t * 255.0 + 0.5), 255u);
@@ -167,6 +225,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID) {
 # 分位/Otsu/中位一律用 bin 权重 g_bin —— 前缀和是累计值不能当计数累加）
 QUANT_CS = """
 StructuredBuffer<uint> hist : register(t0);
+StructuredBuffer<uint> g_range : register(t1);   // [0]=min [1]=max（minmax_cs）
 RWStructuredBuffer<uint> uav_stats : register(u0);
 cbuffer CB : register(b0) { float4 P[16]; };
 
@@ -247,15 +306,17 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
         // ---- 显示仿射（归一化范围）的更新 ----
         // 无时域跟踪：默认 percentile = 每帧快照（P2/P98 → [0.02,0.98]）。
         // 内容/平移/模型标定变化一律当帧生效，不做帧间拟合或门控。
-        float span = P[0].y - P[0].x;
-        float lo_raw = P[0].x + saturate(lo_v) * span;
-        float hi_raw = P[0].x + saturate(hi_v) * span;
+        // bin 位置 → raw 值：量程取本帧 min/max（range 缓冲）
+        float r_lo = asfloat(g_range[0]), r_hi = asfloat(g_range[1]);
+        float span = r_hi - r_lo;
+        float lo_raw = r_lo + saturate(lo_v) * span;
+        float hi_raw = r_lo + saturate(hi_v) * span;
         float mid_n = 0.5 * (saturate(mid1_v) + saturate(mid2_v));
-        float mid_raw = P[0].x + mid_n * span;
-        // decile（mode 5）：P10/P90 → [0.1, 0.9] 快照，越界才截断
+        float mid_raw = r_lo + mid_n * span;
+        // decile（mode 5）：P10/P90 → [0.1,0.9] 快照，越界才截断
         if ((int)P[2].w == 5) {
-            float lo_d = P[0].x + saturate(q10_v) * span;
-            float hi_d = P[0].x + saturate(q90_v) * span;
+            float lo_d = r_lo + saturate(q10_v) * span;
+            float hi_d = r_lo + saturate(q90_v) * span;
             uav_stats[0] = asuint(lo_d);
             uav_stats[1] = asuint(hi_d);
             uav_stats[6] = asuint(lo_d);

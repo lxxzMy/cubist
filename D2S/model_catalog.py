@@ -10,35 +10,31 @@ import os
 # 本地 ONNX 模型注册表（唯一来源）——2026-11-24 收口
 # 几个模型只是三样东西不同：文件、输入尺寸 (W,H)、预处理方式；后面的管线
 # （prep → DML → 深度链 → 显示）完全一致。加模型 = 加一行。
+# 模型的输出值域**不在这里写**：直方图量程每帧按 raw 的 min/max 自动取
+# （D3DStats 的 minmax pass），所以模型输出什么尺度都不用配。
 #   label      设置面板显示名
 #   file       ONNX 文件名（models/ 或 runtime/ 下）
 #   size       模型输入 (W, H)
 #   prep_norm  True：prep 做 ImageNet mean/std（模型要外部归一化）
 #              False：原样 0..1 RGB（mean/std 在 ONNX 图里，再归一化=双重标准化）
-#   raw_range  D3DStats 直方图窗（模型 raw 值域；P2/P98 在窗内取，窗外会饱和）
 #   license    权重许可（随包分发时写 NOTICE）
 # ---------------------------------------------------------------------------
 LOCAL_MODELS = {
     "d224": dict(label="DepthART 224",
                  file="depth-224.onnx", size=(224, 224),
-                 prep_norm=True, raw_range=(0.20, 5.40),
-                 license="CC BY-NC 4.0"),
+                 prep_norm=True, license="CC BY-NC 4.0"),
     "d448": dict(label="DepthART 448",
                  file="depth-448.onnx", size=(448, 448),
-                 prep_norm=True, raw_range=(0.20, 8.00),
-                 license="CC BY-NC 4.0"),
+                 prep_norm=True, license="CC BY-NC 4.0"),
     "zip384": dict(label="ZipDepth 384",
                    file="zipdepth-384.onnx", size=(384, 384),
-                   prep_norm=False, raw_range=(0.0, 1.0),
-                   license="MIT"),
+                   prep_norm=False, license="MIT"),
     "zipw512": dict(label="ZipDepth 宽屏 512×288",
                     file="zipdepth_wide_512x288.onnx", size=(512, 288),
-                    prep_norm=False, raw_range=(0.0, 1.0),
-                    license="MIT"),
+                    prep_norm=False, license="MIT"),
     "zipw672": dict(label="ZipDepth 宽屏 672×384",
                     file="zipdepth_wide_672x384.onnx", size=(672, 384),
-                    prep_norm=False, raw_range=(0.0, 1.0),
-                    license="MIT"),
+                    prep_norm=False, license="MIT"),
 }
 
 # Model Mapping Dict
@@ -146,9 +142,6 @@ PREP_RAW_MODELS = {f"local/{k}" for k, s in LOCAL_MODELS.items()
                    if not s["prep_norm"]}
 # 输入尺寸 (W, H)；不在表里的模型按 Depth Resolution × 同值（方形）
 MODEL_SIZES = {f"local/{k}": tuple(s["size"]) for k, s in LOCAL_MODELS.items()}
-# D3DStats 直方图窗 (raw_lo, raw_hi)
-MODEL_RAW_RANGE = {f"local/{k}": tuple(s["raw_range"])
-                   for k, s in LOCAL_MODELS.items()}
 
 # 本地模型文件：注册表生成 + 旧档位。键 (模型, 输入高)——老代码按
 # (Depth Model, Depth Resolution) 查；值为 None = 该组合未导出。

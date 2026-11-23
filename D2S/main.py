@@ -1126,16 +1126,6 @@ def _model_size():
         return (224, 224)
 
 
-def _stats_range():
-    """D3DStats 直方图窗（raw 值域）：注册表 raw_range；不在注册表用
-    DepthART 口径 0.20~5.40。"""
-    s = _model_spec()
-    if s is not None:
-        lo, hi = s["raw_range"]
-        return dict(raw_lo=float(lo), raw_hi=float(hi))
-    return dict(raw_lo=0.20, raw_hi=5.40)
-
-
 def _main_d3d(mode="Viewer"):
     """D3D12 产品主循环（Cubist-1.1-d3d 主路径；GL 回退 D2S_RENDER=gl）。
 
@@ -1262,10 +1252,9 @@ def _main_d3d(mode="Viewer"):
             _fcons11, _ = _bridge.consumer_handles()
             _zcc.attach_bridge_fence(_f11, _ctx4, _fcons11)
             ring = _bridge.open_ring(_zcc._ring, _zcc._w, _zcc._h)
-            # 直方图窗按模型给：DepthART raw≈0.2~5.4；ZipDepth 相对逆深度 ≈0~0.2，
-            # 用默认窗会把它整个压到 bin0 → 归一化后全屏一个值
-            stats = D3DStats(ren, (window._res_w, window._res_h),
-                             **_stats_range())
+            # 直方图量程每帧按 raw 的 min/max 自动取（D3DStats 内），
+            # 模型输出什么尺度都不用配
+            stats = D3DStats(ren, (window._res_w, window._res_h))
             shim = _shim_mod.open_shim2(ren, window.prep.prep,
                                         (window._res_w, window._res_h))
             _npx = window._res_w * window._res_h

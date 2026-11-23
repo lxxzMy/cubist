@@ -44,7 +44,7 @@ def main():
     fails = []
     adv = _ad.pick()
     ren = dr.D3DRenderer(luid=(adv.luid if adv else 0), debug=False)
-    st = D3DStats(ren, RES, raw_lo=0.20, raw_hi=5.40)
+    st = D3DStats(ren, RES)     # 直方图量程 = 每帧 raw 的 min/max（自动）
     # 逻辑测试关掉防抖（生产默认 15 帧），防抖单独在 S12 验证
     st.cut_min_scene = 1.0
     rng = np.random.default_rng(3)
@@ -94,11 +94,13 @@ def main():
     if abs(hi_g - hi_c) > 0.03:
         fails.append(f"S1 hi {hi_g:.4f} vs {hi_c:.4f}")
 
-    # Otsu 近峰中位（归一化域对账）
-    anchor_raw = 0.20 + anchor_g * (5.40 - 0.20)
-    anchor_cpu = depth_norm.near_peak_median(
-        (raw - 0.20) / (5.40 - 0.20))
-    anchor_cpu_raw = 0.20 + anchor_cpu * (5.40 - 0.20)
+    # Otsu 近峰中位（归一化域对账）：归一化域 = 本帧量程 [min, max]
+    # （::4 域，自动取；GPU 的 minmax pass 与之同域）
+    _sub = raw[::4, ::4]
+    r_mn, r_span = float(_sub.min()), float(_sub.max() - _sub.min())
+    anchor_raw = r_mn + anchor_g * r_span
+    anchor_cpu = depth_norm.near_peak_median((raw - r_mn) / r_span)
+    anchor_cpu_raw = r_mn + anchor_cpu * r_span
     print(f"[S2] 锚 GPU(raw)={anchor_raw:.4f} CPU(raw)={anchor_cpu_raw:.4f}",
           flush=True)
     if abs(anchor_raw - anchor_cpu_raw) > 0.10:
@@ -440,7 +442,10 @@ def main():
     if f_busy != 0.0:
         fails.append(f"S13 高阈下仍切 tv={tv_busy:.3f} thr={thr_busy:.3f}")
 
-    # S11 近侧主体峰锚：两个近景主体 + 远景 → 锚到更近的主体
+    # S11 近侧主体峰锚：两个近景主体 + 远景 → 锚到更近的主体。
+    # 锚 = 近侧 q=10% 质量分位（2026-11-22 定案，原 5%）：主体须占画面
+    # >10%（80×80 ≈ 12.7%）锚才落在它身上。旧几何 60×60 只占 7.2%，凑不够
+    # 10% 质量，锚会继续往远端伸到第二主体——那是 q=10% 的设计行为。
     def _anchor_of(arr):
         t = upload_tex(ren, arr)
         ren.begin_frame()
@@ -449,13 +454,13 @@ def main():
         return st.readback()[5]
 
     d11 = np.full((RES, RES), 0.25, np.float32)
-    d11[30:90, 30:90] = 0.80       # 主体 A（更近）
-    d11[120:180, 140:200] = 0.60   # 主体 B
+    d11[20:100, 20:100] = 0.80       # 主体 A（更近，12.7% 画面）
+    d11[120:200, 140:220] = 0.60     # 主体 B（12.7% 画面）
     d11 = np.clip(d11 + rng.normal(0, 0.01, d11.shape), 0.0, 1.0)
     a11 = _anchor_of(d11.astype(np.float32))
     e11 = near_q_anchor(d11, st.anchor_q)
     d12 = np.full((RES, RES), 0.25, np.float32)
-    d12[120:180, 140:200] = 0.60
+    d12[120:200, 140:220] = 0.60
     d12 = np.clip(d12 + rng.normal(0, 0.01, d12.shape), 0.0, 1.0)
     a12 = _anchor_of(d12.astype(np.float32))
     e12 = near_q_anchor(d12, st.anchor_q)

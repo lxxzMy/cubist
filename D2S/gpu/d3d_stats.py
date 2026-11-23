@@ -14,6 +14,12 @@ stats buffer 布局（uint[8] structured，float 位模式）：
   [8] RGB TV（遥测）；[9] cut 决策（纯 RGB）；[10] 本帧自适应阈值（遥测）
   [0]/[1] 是**时域平滑后**的 lo/hi（链 shader 直接用）；[6]/[7] 是原始分位
 
+直方图量程（range 缓冲，2 floats）：**每帧 raw 的 min/max**（minmax_cs，
+::4 子采样域，与直方图同一批样本）。直方图按 [min, max] 分 256 bin、分位
+再映射回 raw 值——不再有按模型手填的固定区间（2026-11-24 用户定案：标定
+全自动）。手填区间的两个毛病都由它消掉：太短 → 越界样本挤进末格、P98 顶死
+在端点；太长 → 数据只占少数 bin、分位变粗。
+
 z 乒乓：z_cur 写本帧 z_sub（PS 采样 raw ::4 + 本帧 lo/hi 归一化），
 z_prev 读上帧（cut 对比）；帧末交换，无拷贝。
 """
@@ -24,7 +30,8 @@ import numpy as np
 
 from . import d3drender as dr
 from .hlsl import compile_shader
-from .hlsl_stats import (ANCHOR_CS, HIST_CS, QUANT_CS, RGB_HIST_CS, ZERO_CS)
+from .hlsl_stats import (ANCHOR_CS, HIST_CS, MINMAX_CS, QUANT_CS, RGB_HIST_CS,
+                         ZERO_CS)
 
 ST_COMMON = 0x0
 ST_UAV = 0x8             # D3D12_RESOURCE_STATE_UNORDERED_ACCESS
@@ -59,7 +66,7 @@ DEPTH_RANGE_MAX = DEPTH_RANGE_HI   # 兼容旧引用
 class D3DStats:
     """GPU 判据块（宿主 = D3DRenderer）。"""
 
-    def __init__(self, ren, res=224, raw_lo=0.20, raw_hi=5.40):
+    def __init__(self, ren, res=224):
         self.ren = ren
         # res：int = 方形；(w, h) = 非方形（16:9 宽屏模型）
         if isinstance(res, (tuple, list)):
@@ -71,14 +78,15 @@ class D3DStats:
         self.sub_w = (self.res_w + 3) // 4
         self.sub_h = (self.res_h + 3) // 4
         self.sub = self.sub_w           # 兼容旧调用
-        self.raw_lo = raw_lo
-        self.raw_hi = raw_hi
         self.hist = ren.make_uav_buf(256 * 4)
         self.rgb_prev = ren.make_uav_buf(4096 * 4)
         self.tv_hist = ren.make_uav_buf(64 * 4)   # 自适应 TV 环（GPU 常驻状态）
         self.stats = ren.make_uav_buf(32 * 4)
+        self.range = ren.make_uav_buf(2 * 4)      # 本帧直方图量程 [min, max]
         self._p_zero = ren.create_cs_pso(
             "stats_zero", compile_shader("stats_zero", ZERO_CS, "cs"))
+        self._p_minmax = ren.create_cs_pso(
+            "stats_minmax", compile_shader("stats_minmax", MINMAX_CS, "cs"))
         self._p_hist = ren.create_cs_pso(
             "stats_hist", compile_shader("stats_hist", HIST_CS, "cs"))
         self._p_rgb = ren.create_cs_pso(
@@ -145,13 +153,13 @@ class D3DStats:
         return 1.0 - _m.exp(-dt * 1000.0 / max(1.0, self.range_tau_ms))
 
     def _cb(self, cut_res=CUT_RES, a_range=1.0, mode=None):
-        """compute cbuffer：P[0]=(raw_lo, raw_hi, full_res, cut_res_eff)，
-        P[1]=(sub_res, step, 0, range_alpha)，
-        P[2]=(0, range_lo, range_span, range_mode)。
+        """compute cbuffer：P[0] 的 x/y 预留（量程在 range 缓冲里，由
+        minmax_cs 每帧写，不走 cbuffer），P[1]=(sub_res, step, sub_h,
+        range_alpha)，P[2]=(0, range_lo, range_span, range_mode)。
         cut 阈值按 range_span 缩放 → 与 [0,1] 域判定等价。"""
         m = (mode or self.range_mode)
         band_lo, band_span = self._band(m)
-        return [float(self.raw_lo), float(self.raw_hi), float(self.res),
+        return [0.0, 0.0, float(self.res),
                 float(cut_res) * band_span, float(self.sub_w), 4.0,
                 float(self.sub_h), float(a_range), 0.0,
                 float(band_lo), float(band_span),
@@ -162,8 +170,8 @@ class D3DStats:
                color_tex=None, color_size=None):
         """录判据链到当前帧（须在 begin_frame 之后，raw 已就绪）。
 
-        raw_tex: R32F res×res（raw 深度）。链内完成：hist(::4) →
-        RGB 场景切换判据（需 color_tex）→ 分位/Otsu 锚。
+        raw_tex: R32F res×res（raw 深度）。链内完成：min/max(量程，::4) →
+        hist(::4) → RGB 场景切换判据（需 color_tex）→ 分位/Otsu 锚。
         cut=False 时 RGB 仍算 TV（遥测）但不触发切变决策（供确定性测试）。
         color_tex/color_size: 采集帧 BGRA8 + (w,h)；缺失时无 cut 判据
         （stats[8]/[9] 被 ZERO_CS 清零）。
@@ -176,18 +184,23 @@ class D3DStats:
         g_w = (self.sub_w + 15) // 16
         g_h = (self.sub_h + 15) // 16
         # ECL 后资源实际状态恒 COMMON：记录先对齐（槽位可能留上帧值）
-        for b in (self.hist, self.stats, self.rgb_prev, self.tv_hist):
+        for b in (self.hist, self.stats, self.rgb_prev, self.tv_hist,
+                  self.range):
             b.state = ST_COMMON
-        raw_tex.transition(ST_ALL_SRV)   # hist(CS) 读
+        raw_tex.transition(ST_ALL_SRV)   # minmax / hist(CS) 读
         self.hist.transition(ST_UAV)
         self.stats.transition(ST_UAV)
         ren.dispatch(self._p_zero, [self.hist, self.stats], [], self._cb(), 1)
         # UAV→UAV 依赖必须显式执行屏障（zero→hist / zero→quant 共用缓冲）
         self.hist.uav_barrier()
         self.stats.uav_barrier()
+        # 量程：本帧 raw 的 min/max（::4 域）→ range[2]，直方图按它分格
+        self.range.transition(ST_UAV)
+        ren.dispatch(self._p_minmax, [self.range], [raw_tex], self._cb(), 1)
+        self.range.transition(ST_NON_PIXEL_SRV)     # 写完 → 供 hist/quant 读
         # 直方图（::4 域，对齐 depth_norm.percentile_stats）
-        ren.dispatch(self._p_hist, [self.hist], [raw_tex], self._cb(),
-                     g_w, g_h, 1)
+        ren.dispatch(self._p_hist, [self.hist], [raw_tex, self.range],
+                     self._cb(), g_w, g_h, 1)
         self.hist.uav_barrier()
         if color_tex is not None:
             w, h = (color_size or (self.res, self.res))
@@ -208,13 +221,14 @@ class D3DStats:
         _a_r = self._range_alpha(alpha_range)
         _mode = (self.range_mode if range_mode is None
                  else str(range_mode).lower())
-        ren.dispatch(self._p_quant, [self.stats], [self.hist],
+        ren.dispatch(self._p_quant, [self.stats], [self.hist, self.range],
                      self._cb(a_range=_a_r, mode=_mode), 1)
         # stats 给 PS 读（t7；COMMON 读隐式提升）
         self.stats.transition(ST_COMMON)
         self.hist.transition(ST_COMMON)
         self.rgb_prev.transition(ST_COMMON)
         self.tv_hist.transition(ST_COMMON)
+        self.range.transition(ST_COMMON)
 
     @staticmethod
     def _band(mode):
@@ -298,7 +312,7 @@ class D3DStats:
     def readback(self):
         """读回 stats 4 floats（一站式；独立帧）。返回 (lo, hi, anchor, cut)。
 
-        lo/hi 已按 raw 值域窗口还原为 raw 值。
+        lo/hi 已按本帧量程（range 缓冲的 min/max）还原为 raw 值。
         """
         ren = self.ren
         v = self.readback_start()
