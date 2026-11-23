@@ -45,10 +45,10 @@ float4 PSMain(VOut i) : SV_Target {
 }
 """
 
-# 深度图模式：直接显示**模型原始深度**（post.raw，224²），线性上采样到
-# 当前分辨率；按本帧 P2/P98（stats t7 的 g_stats[0]/[1]）归一化到 [0,1] 再
-# spectral 上色（近红远蓝）。stats 未绑定时（离屏工具/测试）回退为直接
-# saturate(raw)（测试喂的就是 0..1）。
+# 深度图模式：显示深度链上的一级（默认 Final = 3D 实际用的那张；阶段由
+# depth_map_stage 选），线性上采样到当前分辨率。非 raw 阶段的值已在
+# [0.02,0.98]，直接 saturate 后上色；raw 阶段按本帧 P2/P98（stats t7 的
+# g_stats[0]/[1]）归一化到 [0,1]（stats 未绑定时回退为 saturate(raw)）。
 DEPTH_MAP_FS = """
 Texture2D tex_depth : register(t0);
 StructuredBuffer<uint> g_stats : register(t7);
@@ -57,20 +57,31 @@ cbuffer CB : register(b0) { float4 P[16]; };
 
 struct VOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 
-float3 spectral_r_ultrafast(float t) {
-    float3 color1 = float3(0.0, 0.298, 0.651);
-    float3 color2 = float3(0.0, 0.5, 0.0);
-    float3 color3 = float3(1.0, 0.851, 0.0);
-    float3 color4 = float3(0.988, 0.0, 0.0);
-    float w1 = max(0.0, 1.0 - abs(t - 0.125) * 4.0);
-    float w2 = max(0.0, 1.0 - abs(t - 0.375) * 4.0);
-    float w3 = max(0.0, 1.0 - abs(t - 0.625) * 4.0);
-    float w4 = max(0.0, 1.0 - abs(t - 0.875) * 4.0);
-    float total = w1 + w2 + w3 + w4;
-    if (total > 0.0) {
-        w1 /= total; w2 /= total; w3 /= total; w4 /= total;
-    }
-    return color1 * w1 + color2 * w2 + color3 * w3 + color4 * w4;
+// 连续色表（matplotlib "Spectral" 反向：远 = 靛蓝/蓝 -> 青 -> 绿 -> 黄 -> 橙
+// -> 红 -> 暗红 = 近），11 个停点线性插值，整段没有平台。
+// 旧版是 4 段近似的 spectral_r_ultrafast：只有蓝/绿/黄/红 4 个色相，而且
+// t <= 0.125 全是同一个纯蓝、t >= 0.875 全是同一个纯红——最远和最近的画面
+// 被压成单色（实测一张照片 18%、桌面/游戏画面约 12% 的像素丢掉层次；
+// 2026-11-24 用户指出"背景完全没表现出来"）。深度值本身一直是对的，丢信息
+// 的只是这张色表。
+static const float3 SPECTRAL_R[11] = {
+    float3(0.369, 0.310, 0.635),   // 0.0  靛蓝（最远）
+    float3(0.196, 0.533, 0.741),
+    float3(0.400, 0.761, 0.647),
+    float3(0.671, 0.867, 0.643),
+    float3(0.902, 0.961, 0.596),
+    float3(1.000, 1.000, 0.749),
+    float3(0.996, 0.878, 0.545),
+    float3(0.992, 0.682, 0.380),
+    float3(0.957, 0.427, 0.263),
+    float3(0.835, 0.243, 0.310),
+    float3(0.620, 0.004, 0.259),   // 1.0  暗红（最近）
+};
+
+float3 spectral_r(float t) {
+    float x = saturate(t) * 10.0;
+    int i = min((int)x, 9);
+    return lerp(SPECTRAL_R[i], SPECTRAL_R[i + 1], x - (float)i);
 }
 
 float4 PSMain(VOut i) : SV_Target {
@@ -81,7 +92,7 @@ float4 PSMain(VOut i) : SV_Target {
     float lo = asfloat(g_stats[0]), hi = asfloat(g_stats[1]);
     float depth = (hi > lo + 1e-6)
         ? saturate((raw - lo) / (hi - lo)) : saturate(raw);
-    float3 color = spectral_r_ultrafast(depth);
+    float3 color = spectral_r(depth);
     return float4(color, 1.0);
 }
 """

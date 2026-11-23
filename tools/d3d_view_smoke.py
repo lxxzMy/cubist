@@ -69,9 +69,22 @@ def main():
     px_top = arr2[5, W // 2]     # BGRA: [0]=B [2]=R
     px_bot = arr2[H - 5, W // 2]
     assert px_top[0] > 160 and px_top[2] < 120, f"depth_map 顶部应蓝={px_top}"
-    assert px_bot[2] > 160 and px_bot[0] < 120, f"depth_map 底部应红={px_bot}"
+    assert px_bot[2] > 150 and px_bot[0] < 120, f"depth_map 底部应红={px_bot}"
     print("[2] depth_map 离屏 OK  top(BGR)=%s bottom(BGR)=%s"
           % (px_top[:3].tolist(), px_bot[:3].tolist()))
+    # 色表不得有"平台"：旧版 4 段色表在 t<=0.125 / t>=0.875 各是一整段同色，
+    # 最远/最近的画面被压成单色（2026-11-24）。渐变沿 y（见上），取同一段里
+    # 的两个深度值，颜色必须不一样。
+    def _at(t):
+        return arr2[int(H * t), W // 2].astype(int)
+    for ta, tb in ((0.02, 0.10), (0.90, 0.98)):
+        d = int(np.abs(_at(ta) - _at(tb)).sum())
+        assert d > 30, (
+            f"depth_map 色表有平台：t={ta} 与 t={tb} 颜色几乎相同"
+            f"（{_at(ta).tolist()} vs {_at(tb).tolist()}）")
+    print("[2b] 色表两端无平台 OK  t=0.02/0.10 → %s/%s，t=0.90/0.98 → %s/%s"
+          % (_at(0.02)[:3].tolist(), _at(0.10)[:3].tolist(),
+             _at(0.90)[:3].tolist(), _at(0.98)[:3].tolist()))
 
     # ---- 2) swapchain 生命周期 ----
     for i in range(20):
