@@ -99,8 +99,19 @@ class D3DStereoWindow:
                  parallax_px=12.0, ipd_uv=0.064, interleave_phase=0,
                  feather_enabled=False, cursor_overlay=False, show_fps=False,
                  frame_size=(1280, 720), vsync=False, fix_aspect=False,
-                 specify_display=False, same_screen=True, **_kw):
+                 specify_display=False, same_screen=True, depth_res=224,
+                 prep_normalize=True, **_kw):
         from utils import VERSION  # noqa: F401  （导入期健康检查）
+        # 深度模型输入尺寸：int = 方形；(w, h) = 非方形（16:9 宽屏模型）。
+        # prep flat 几何、DML shim、深度链、GPU 判据全部按它建；必须与
+        # settings 的 Depth Model/Resolution 一致
+        if isinstance(depth_res, (tuple, list)):
+            self._res_w, self._res_h = int(depth_res[0]), int(depth_res[1])
+        else:
+            self._res_w = self._res_h = int(depth_res)
+        self._res = self._res_w         # 兼容旧调用（当方形用的那些地方）
+        # prep 是否做 ImageNet 归一化（False = 原样 0..1 RGB，图内自带 mean/std 的模型）
+        self._prep_normalize = bool(prep_normalize)
         self.display_mode = display_mode
         self._mode = _MODE_MAP.get(display_mode, "half_sbs")
         self.fill_16_9 = bool(fill_16_9)
@@ -180,9 +191,9 @@ class D3DStereoWindow:
 
         self.disp = dv.D3DDisplay(self.ren, self.hwnd, w, h, use_flip=True)
         self.disp.fill_16_9 = self.fill_16_9
-        self.prep = D3DDepthPrep(self.ren, 224)
-        self.post = D3DDepthPost(self.ren, 224)
-        self._res = 224
+        self.prep = D3DDepthPrep(self.ren, (self._res_w, self._res_h),
+                                 normalize=self._prep_normalize)
+        self.post = D3DDepthPost(self.ren, (self._res_w, self._res_h))
         self._post_inited = True
         # FPS HUD（GL 同款：Pillow 文字 → 独立 OverlayDraw，每眼底左、横向压缩）
         self.show_fps = bool(show_fps)
@@ -363,7 +374,11 @@ class D3DStereoWindow:
 
     # ---- 深度管线（main 调用集） ----------------------------------------
     def gpu_depth_init(self, res):
-        self._res = int(res)
+        if isinstance(res, (tuple, list)):
+            self._res_w, self._res_h = int(res[0]), int(res[1])
+        else:
+            self._res_w = self._res_h = int(res)
+        self._res = self._res_w
 
     def gpu_preprocess(self, src_tex=None):
         """色源 → prep 纹理。src_tex=None → CPU 上传路径（2D 回退）。"""
@@ -373,8 +388,7 @@ class D3DStereoWindow:
             self.prep.prep.state = dr.ST_COMMON
             self.prep.prep.transition(dr.ST_RENDER_TARGET)
             self.ren.draw_pass(self.prep._pso, [src_tex],
-                               [float(self._res), float(self.prep.flat_w),
-                                0.0, 0.0],
+                               self.prep.consts(),
                                self.prep.prep, self.prep.prep_w,
                                self.prep.prep_h)
             self.prep.prep.state = dr.ST_COMMON

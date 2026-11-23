@@ -1092,6 +1092,37 @@ def _resolve_capture_output(window):
     return False, out_i
 
 
+def _prep_normalize():
+    """prep 是否做 ImageNet 归一化：ZipDepth 等模型 mean/std 在图内 → False。"""
+    try:
+        import utils as _u
+        from model_catalog import PREP_RAW_MODELS
+        return str(_u.MODEL_MAPPING.get(_u.MODEL, "")) not in PREP_RAW_MODELS
+    except Exception:
+        return True
+
+
+def _model_size():
+    """模型输入 (W, H)：非方形模型查 model_catalog.MODEL_SIZES；其余方形 =
+    Depth Resolution × 同值。"""
+    try:
+        import utils as _u
+        from model_catalog import MODEL_SIZES
+        mid = str(_u.MODEL_MAPPING.get(_u.MODEL, ""))
+        if mid in MODEL_SIZES:
+            return MODEL_SIZES[mid]
+        r = int(_u.DEPTH_RESOLUTION)
+        return (r, r)
+    except Exception:
+        return (224, 224)
+
+
+def _stats_range():
+    """D3DStats 直方图窗（raw 值域）：ZipDepth 相对逆深度 ≈0~0.2 → 0~1；
+    其它沿用默认（DepthART 0.20~5.40）。"""
+    return {} if _prep_normalize() else dict(raw_lo=0.0, raw_hi=1.0)
+
+
 def _main_d3d(mode="Viewer"):
     """D3D12 产品主循环（Cubist-1.1-d3d 主路径；GL 回退 D2S_RENDER=gl）。
 
@@ -1148,14 +1179,15 @@ def _main_d3d(mode="Viewer"):
         interleave_phase=INTERLEAVE_PHASE,
         cursor_overlay=(CURSOR_MODE == "overlay"),
         show_fps=bool(SHOW_FPS),
-        frame_size=(_w, _h), vsync=bool(VSYNC), same_screen=SAME_SCREEN)
+        frame_size=(_w, _h), vsync=bool(VSYNC), same_screen=SAME_SCREEN,
+        depth_res=_model_size(), prep_normalize=_prep_normalize())
     window.set_title(WINDOW_TITLE)   # 与 GL 路径同标题（托盘守护按标题找窗口）
     # 采集屏/输出屏（AB 分离）：window.output_index 始终是"DDA 采集输出
     # 序号"，这里按 CAPTURE_MONITOR_INDEX 解析（不同卡 → 弹框 + 回退）。
     _cap_ok, _cap_oi = _resolve_capture_output(window)
     window.output_index = _cap_oi
     print(f"[Main] D3D 产品窗口就绪 {_w}x{_h} display={DISPLAY_MODE} "
-          f"same_screen={SAME_SCREEN} res={window._res} "
+          f"same_screen={SAME_SCREEN} res={window._res_w}x{window._res_h} "
           f"cap_mon={CAPTURE_MONITOR_INDEX} cap_oi={_cap_oi}"
           f"{'' if _cap_ok else '（不同卡回退）'}", flush=True)
     if FULLSCREEN_OUTPUT and os.environ.get("D2S_WDA", "1") != "0":
@@ -1216,10 +1248,15 @@ def _main_d3d(mode="Viewer"):
             _fcons11, _ = _bridge.consumer_handles()
             _zcc.attach_bridge_fence(_f11, _ctx4, _fcons11)
             ring = _bridge.open_ring(_zcc._ring, _zcc._w, _zcc._h)
-            stats = D3DStats(ren, window._res)
-            shim = _shim_mod.open_shim2(ren, window.prep.prep, window._res)
-            out = np.empty(window._res * window._res, np.float32)
-            out2 = np.empty(window._res * window._res, np.float32)
+            # 直方图窗按模型给：DepthART raw≈0.2~5.4；ZipDepth 相对逆深度 ≈0~0.2，
+            # 用默认窗会把它整个压到 bin0 → 归一化后全屏一个值
+            stats = D3DStats(ren, (window._res_w, window._res_h),
+                             **_stats_range())
+            shim = _shim_mod.open_shim2(ren, window.prep.prep,
+                                        (window._res_w, window._res_h))
+            _npx = window._res_w * window._res_h
+            out = np.empty(_npx, np.float32)
+            out2 = np.empty(_npx, np.float32)
             _cap = dict(zcc=_zcc, bridge=_bridge, ring=ring, stats=stats,
                         shim=shim, out=out, outs=[out, out2],
                         fcons12=_bridge.consumer_fence12())
@@ -1583,8 +1620,7 @@ def _main_d3d(mode="Viewer"):
         window.prep.prep.state = _dr.ST_COMMON
         window.prep.prep.transition(_dr.ST_RENDER_TARGET)
         ren.draw_pass(window.prep._pso, [src],
-                      [float(window._res), float(window.prep.flat_w),
-                       0.0, 0.0],
+                      window.prep.consts(),
                       window.prep.prep, window.prep.prep_w,
                       window.prep.prep_h)
         window.prep.prep.state = _dr.ST_COMMON
@@ -1597,7 +1633,7 @@ def _main_d3d(mode="Viewer"):
             _st_run.append(float(cap["shim"].times6()[1]))
         except Exception:
             pass
-        raw = cap["out"].reshape(window._res, window._res)
+        raw = cap["out"].reshape(window._res_h, window._res_w)
         _t1 = time.perf_counter()
         _ta1 = time.perf_counter()
         # 4) 深度链（GPU 判据：lo/hi/cut 全在 GPU；EMA α 由 cut 覆写）
@@ -1606,14 +1642,16 @@ def _main_d3d(mode="Viewer"):
                            time.perf_counter()) if _smooth != "off" else 1.0)
         if _ema_first:
             alpha = 1.0
-        aa = (float(getattr(_depth_mod, "AA_STRENGTH", 0.0)) * 0.5
-              * (int(_depth_mod.DEPTH_RESOLUTION) / 224.0))
-        # aa = 旋钮值 = 【较大方向的 σ】（横屏时就是竖向）。224² 深度拉伸到
-        # 每眼视口后，屏幕空间各向同性要求：短边对应方向的 texel σ 更大。
-        # 横屏（vp_w≥vp_h）：V = aa，H = aa·(vp_h/vp_w)
-        #   16:9 → V=aa，H=aa/1.778；Half-SBS 非Fill 每眼 960×1080 → V=aa，
-        #   H=aa·0.889。
-        # 竖屏反过来（H=aa，V=aa·(vp_w/vp_h)）。
+        # aa = 旋钮值 = 【较大方向的 σ】。深度 W×H 拉伸到每眼视口后，屏幕空间
+        # 各向同性要求：V = base·H/224，H = base·W/224·(vp_h/vp_w)。
+        #   方形模型（W==H）时就是旧公式 V=aa、H=aa·(vp_h/vp_w)：
+        #   16:9 → H=aa/1.778；Half-SBS 非Fill 每眼 960×1080 → H=aa·0.889。
+        #   16:9 宽屏模型（W/H ≈ 视口比）texel 在屏幕上本就各向同性 → 两轴相等。
+        base = (float(getattr(_depth_mod, "AA_STRENGTH", 0.0)) * 0.5)
+        _rw = int(getattr(window, "_res_w", 224))
+        _rh = int(getattr(window, "_res_h", 224))
+        aa_v = base * (_rh / 224.0)
+        aa_h = base * (_rw / 224.0)
         _m = getattr(window, "_mode", "interleaved")
         _sw, _sh = cap["zcc"].size
         try:
@@ -1623,15 +1661,15 @@ def _main_d3d(mode="Viewer"):
                 _vp = window.disp.single_viewport(_sw, _sh)
             _ar = float(_vp[2]) / max(1.0, float(_vp[3]))
             if _ar >= 1.0:
-                _aa_h, _aa_v = aa / _ar, aa
+                _aa_h, _aa_v = aa_h / _ar, aa_v
             else:
-                _aa_h, _aa_v = aa, aa * _ar
+                _aa_h, _aa_v = aa_h, aa_v * _ar
         except Exception:
-            _vp, _aa_h, _aa_v = None, aa, aa
+            _vp, _aa_h, _aa_v = None, aa_v, aa_v
         _aa_key = (round(_aa_h, 3), round(_aa_v, 3))
         if globals().get("_aa_key_last") != _aa_key:
             globals()["_aa_key_last"] = _aa_key
-            print(f"[depth] AA σ: 大方向={aa:.2f} → H={_aa_h:.2f} "
+            print(f"[depth] AA σ: 大方向={max(_aa_h, _aa_v):.2f} → H={_aa_h:.2f} "
                   f"V={_aa_v:.2f}（视口 "
                   f"{'%dx%d' % _vp[2:4] if _vp else '?'}）", flush=True)
         window.post.upload_raw(raw)
@@ -1830,9 +1868,13 @@ def _main_d3d(mode="Viewer"):
     _pl_ticked = [False]      # 本拍是否已由 idle 分支推进（防重复 tick）
 
     def _pl_aa():
-        """当前每眼视口的各向异性 σ（与 _process 同口径）。"""
-        aa = (float(getattr(_depth_mod, "AA_STRENGTH", 0.0)) * 0.5
-              * (int(_depth_mod.DEPTH_RESOLUTION) / 224.0))
+        """当前每眼视口的各向异性 σ（与 _process 同口径）：V = base·H/224，
+        H = base·W/224·(vp_h/vp_w)；方形模型时与旧公式逐位相同。"""
+        base = (float(getattr(_depth_mod, "AA_STRENGTH", 0.0)) * 0.5)
+        _rw = int(getattr(window, "_res_w", 224))
+        _rh = int(getattr(window, "_res_h", 224))
+        aa_v = base * (_rh / 224.0)
+        aa_h = base * (_rw / 224.0)
         _m = getattr(window, "_mode", "interleaved")
         _sw, _sh = cap["zcc"].size
         try:
@@ -1841,9 +1883,9 @@ def _main_d3d(mode="Viewer"):
             else:
                 _vp = window.disp.single_viewport(_sw, _sh)
             _ar = float(_vp[2]) / max(1.0, float(_vp[3]))
-            return (aa / _ar, aa) if _ar >= 1.0 else (aa, aa * _ar)
+            return (aa_h / _ar, aa_v) if _ar >= 1.0 else (aa_h, aa_v * _ar)
         except Exception:
-            return aa, aa
+            return aa_v, aa_v
 
     def _tick_pipeline(idx):
         """流水线一拍（idx=-1 表示这一拍没有新采集帧）。
@@ -1865,7 +1907,7 @@ def _main_d3d(mode="Viewer"):
                 print(f"[pl] out_buf_ptr 调用失败: {_e!r}", flush=True)
             if _ptr:
                 _pl["raw_buf"] = _dr.Buf(ren.ctx, _ptr,
-                                        window._res * window._res * 4, 0)
+                                        window._res_w * window._res_h * 4, 0)
                 _pl_gpu = True
                 print(f"[pl] GPU 输出模式（推理结果留在显存，链直读；"
                       f"buf={_ptr:#x}）", flush=True)
@@ -1916,7 +1958,8 @@ def _main_d3d(mode="Viewer"):
             _pl["tag"] = None
             _seq = _tag
             _src = cap["ring"][_pidx]
-            window.post.upload_raw(_raw.reshape(window._res, window._res))
+            window.post.upload_raw(
+                _raw.reshape(window._res_h, window._res_w))
             _alpha = (ema_alpha(float(_depth_mod.DEPTH_SMOOTHING_FRAMES),
                                 time.perf_counter())
                       if str(getattr(_depth_mod, "DEPTH_SMOOTHING", "ema"))
@@ -1949,8 +1992,7 @@ def _main_d3d(mode="Viewer"):
             window.prep.prep.state = _dr.ST_COMMON
             window.prep.prep.transition(_dr.ST_RENDER_TARGET)
             ren.draw_pass(window.prep._pso, [_src],
-                          [float(window._res), float(window.prep.flat_w),
-                           0.0, 0.0],
+                          window.prep.consts(),
                           window.prep.prep, window.prep.prep_w,
                           window.prep.prep_h)
             window.prep.prep.state = _dr.ST_COMMON
@@ -2049,8 +2091,7 @@ def _main_d3d(mode="Viewer"):
             window.prep.prep.state = _dr.ST_COMMON
             window.prep.prep.transition(_dr.ST_RENDER_TARGET)
             ren.draw_pass(window.prep._pso, [_src],
-                          [float(window._res), float(window.prep.flat_w),
-                           0.0, 0.0],
+                          window.prep.consts(),
                           window.prep.prep, window.prep.prep_w,
                           window.prep.prep_h)
             window.prep.prep.state = _dr.ST_COMMON

@@ -47,8 +47,10 @@ cbuffer CB : register(b0) { float4 P[16]; };
 [numthreads(16, 16, 1)]
 void CSMain(uint3 tid : SV_DispatchThreadID) {
     uint sub = (uint)P[1].x;
+    // 纵向子采样数（P[1].z，非方形用；0 → 方形回退）
+    uint sub_h = (P[1].z > 0.5) ? (uint)P[1].z : sub;
     uint step = (uint)P[1].y;
-    if (tid.x >= sub || tid.y >= sub) return;
+    if (tid.x >= sub || tid.y >= sub_h) return;
     float lo = P[0].x, hi = P[0].y;
     float v = tex_raw.Load(int3((int)(tid.x * step), (int)(tid.y * step), 0));
     float t = saturate((v - lo) / max(1e-6, hi - lo));
@@ -359,9 +361,11 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
     g_bin[t] = 0;
     GroupMemoryBarrierWithGroupSync();
     uint res = (uint)P[0].x;
+    uint res_h = (P[0].z > 0.5) ? (uint)P[0].z : res;   // 非方形（0=方形）
     uint step = max(1u, (uint)P[0].y);
     uint sub = (res + step - 1) / step;
-    uint total = sub * sub;
+    uint sub_h = (res_h + step - 1) / step;
+    uint total = sub * sub_h;
     for (uint idx = t; idx < total; idx += 256) {
         uint sx = idx % sub;
         uint sy = idx / sub;

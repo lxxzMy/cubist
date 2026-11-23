@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(ROOT, "D2S"))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 os.environ["PATH"] = os.path.join(ROOT, "runtime") + os.pathsep + os.environ.get("PATH", "")
 os.environ["D2S_TEMPORAL"] = "ema"
-os.environ["D2S_ONNX"] = ""
+os.environ["D2S_ONNX"] = os.path.join(ROOT, "runtime", "depth-224.onnx")   # 门禁固定 224
 
 WIN_W, WIN_H = 640, 240
 TEX_W, TEX_H = 320, 240

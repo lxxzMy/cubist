@@ -104,9 +104,7 @@ class D3DPipeline:
         src.transition(dr.ST_PIXEL_SRV)
         self.prep.prep.state = dr.ST_COMMON
         self.prep.prep.transition(dr.ST_RENDER_TARGET)
-        self.ren.draw_pass(self.prep._pso, [src],
-                           [float(self.res), float(self.prep.flat_w), 0.0,
-                            0.0],
+        self.ren.draw_pass(self.prep._pso, [src], self.prep.consts(),
                            self.prep.prep, self.prep.prep_w, self.prep.prep_h)
         self.prep.prep.state = dr.ST_COMMON
         self.ren.submit()

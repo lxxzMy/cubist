@@ -61,8 +61,16 @@ class D3DStats:
 
     def __init__(self, ren, res=224, raw_lo=0.20, raw_hi=5.40):
         self.ren = ren
-        self.res = res
-        self.sub = (res + 3) // 4     # ::4 子采样域（depth_norm 同款）
+        # res：int = 方形；(w, h) = 非方形（16:9 宽屏模型）
+        if isinstance(res, (tuple, list)):
+            self.res_w, self.res_h = int(res[0]), int(res[1])
+        else:
+            self.res_w = self.res_h = int(res)
+        self.res = self.res_w
+        # ::4 子采样域（depth_norm 同款）
+        self.sub_w = (self.res_w + 3) // 4
+        self.sub_h = (self.res_h + 3) // 4
+        self.sub = self.sub_w           # 兼容旧调用
         self.raw_lo = raw_lo
         self.raw_hi = raw_hi
         self.hist = ren.make_uav_buf(256 * 4)
@@ -144,8 +152,8 @@ class D3DStats:
         m = (mode or self.range_mode)
         band_lo, band_span = self._band(m)
         return [float(self.raw_lo), float(self.raw_hi), float(self.res),
-                float(cut_res) * band_span, float(self.sub), 4.0,
-                0.0, float(a_range), 0.0,
+                float(cut_res) * band_span, float(self.sub_w), 4.0,
+                float(self.sub_h), float(a_range), 0.0,
                 float(band_lo), float(band_span),
                 {"lerp": 0.0, "percentile": 1.0, "ratchet": 2.0,
                  "decile": 5.0}.get(m, 1.0)]
@@ -165,7 +173,8 @@ class D3DStats:
         显式值供确定性门禁）。扩张/收缩统一。
         """
         ren = self.ren
-        g = (self.sub + 15) // 16
+        g_w = (self.sub_w + 15) // 16
+        g_h = (self.sub_h + 15) // 16
         # ECL 后资源实际状态恒 COMMON：记录先对齐（槽位可能留上帧值）
         for b in (self.hist, self.stats, self.rgb_prev, self.tv_hist):
             b.state = ST_COMMON
@@ -177,7 +186,8 @@ class D3DStats:
         self.hist.uav_barrier()
         self.stats.uav_barrier()
         # 直方图（::4 域，对齐 depth_norm.percentile_stats）
-        ren.dispatch(self._p_hist, [self.hist], [raw_tex], self._cb(), g, g, 1)
+        ren.dispatch(self._p_hist, [self.hist], [raw_tex], self._cb(),
+                     g_w, g_h, 1)
         self.hist.uav_barrier()
         if color_tex is not None:
             w, h = (color_size or (self.res, self.res))
@@ -231,7 +241,7 @@ class D3DStats:
         ren = self.ren
         depth_tex.transition(ST_ALL_SRV)
         self.stats.transition(ST_UAV)
-        cb = [float(self.res), 4.0, 0.0, 0.0,
+        cb = [float(self.res_w), 4.0, float(self.res_h), 0.0,
               float(self.anchor_q), 0.0, 0.0, 0.0]
         ren.dispatch(self._p_anchor, [self.stats], [depth_tex], cb, 1)
         self.stats.uav_barrier()

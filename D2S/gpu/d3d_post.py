@@ -28,11 +28,19 @@ class D3DDepthPost:
     cbuffer 打包见 gpu/hlsl_depth.pack_consts（同布局）。
     """
 
-    def __init__(self, ren, res=224):
+    def __init__(self, ren, res=224, res_h=None):
         self.ren = ren
-        self.res = res
-        mk = lambda: ren.create_tex(res, res, FMT_R32F, renderable=True)
-        self.raw = ren.create_tex(res, res, FMT_R32F, renderable=True)
+        # res：int = 方形 res×res；(w, h) 元组或 res+res_h = 非方形（16:9 宽屏模型）
+        if isinstance(res, (tuple, list)):
+            self.res_w, self.res_h = int(res[0]), int(res[1])
+        else:
+            self.res_w = int(res)
+            self.res_h = int(res_h) if res_h else int(res)
+        self.res = self.res_w          # 兼容旧调用（当方形用的那些地方）
+        mk = lambda: ren.create_tex(self.res_w, self.res_h, FMT_R32F,
+                                    renderable=True)
+        self.raw = ren.create_tex(self.res_w, self.res_h, FMT_R32F,
+                                  renderable=True)
         self.dil = mk()
         self.sl = [mk(), mk()]
         self.ema = mk()
@@ -48,9 +56,9 @@ class D3DDepthPost:
         self.last_disp_depth = self.disp_depth[0]
         # raw 输入上传 buffer：双缓冲 + 每缓冲"上次被 GPU 读完"的 fence 值。
         # 去掉 wait 之后，下一帧 memmove 不能踩还在被 GPU 读的那一张。
-        self._pitch = dr.row_pitch(res, 4)
-        self.ups = [ren.make_upload_buffer(self._pitch * res),
-                    ren.make_upload_buffer(self._pitch * res)]
+        self._pitch = dr.row_pitch(self.res_w, 4)
+        self.ups = [ren.make_upload_buffer(self._pitch * self.res_h),
+                    ren.make_upload_buffer(self._pitch * self.res_h)]
         self._up_i = 0
         self._up_done = [0, 0]
         self._pso = {}
@@ -64,13 +72,15 @@ class D3DDepthPost:
         self._pso[name] = pso
         return pso
 
-    @staticmethod
-    def _cb(res, lo=0.0, hi=1.0, w=0.0, alpha=0.0, aa=0.0, sigma=0.0, m=0.0,
-            target=0.0, dirx=0.0, diry=0.0, k=0.0, cut_area=0.0,
-            range_lo=0.0, range_span=1.0):
-        b = struct.pack("<15f", res, lo, hi, w, alpha, aa, sigma, m,
+    def _cb(self, res, lo=0.0, hi=1.0, w=0.0, alpha=0.0, aa=0.0, sigma=0.0,
+            m=0.0, target=0.0, dirx=0.0, diry=0.0, k=0.0, cut_area=0.0,
+            range_lo=0.0, range_span=1.0, res_h=None):
+        """cbuffer 64 floats：前 15 个与 GL 版同布局；第 16 个（P[3].w）=
+        纵向分辨率（非方形用，0 = 方形回退）。"""
+        rh = self.res_h if res_h is None else float(res_h)
+        b = struct.pack("<16f", res, lo, hi, w, alpha, aa, sigma, m,
                         target, dirx, diry, k, cut_area,
-                        range_lo, range_span) + b"\x00" * 49 * 4
+                        range_lo, range_span, rh) + b"\x00" * 48 * 4
         return list(np.frombuffer(b, dtype=np.float32))
 
     # ---- 上传 ------------------------------------------------------------
@@ -103,7 +113,7 @@ class D3DDepthPost:
         stats: D3DStats（其 .stats Buf 绑 t7；V2 生产链用）。"""
         pso = self._pso_for(name, ps_src)
         dst.transition(ST_RENDER_TARGET)
-        self.ren.draw_pass(pso, srcs, consts, dst, self.res, self.res,
+        self.ren.draw_pass(pso, srcs, consts, dst, self.res_w, self.res_h,
                            stats=(stats.stats if stats is not None else None))
         dst.transition(ST_COMMON)
 
@@ -133,7 +143,7 @@ class D3DDepthPost:
         """
         from .hlsl_depth import (DIL_FS, GAUSS_FS, MEDIAN_FS, NORM_FS,
                                  NORM_STATS_FS, PP_FS, PP_STATS_FS)
-        res = self.res
+        res = self.res_w
         self.ren.begin_frame()
         # 本帧显示用哪一张 depth 乒乓（与上一帧交替）
         self._disp_i ^= 1
@@ -199,12 +209,12 @@ class D3DDepthPost:
                 self.ren.draw_pass(
                     pso, [cur, self.ema],
                     self._cb(res, alpha=a_eff),
-                    dst, res, res, stats=stats.stats)
+                    dst, res, self.res_h, stats=stats.stats)
             else:
                 pso = self._pso_for("ema_pp", PP_FS)
                 self.ren.draw_pass(pso, [cur, self.ema],
                                    self._cb(res, lo=0.0, hi=1.0, alpha=a_eff),
-                                   dst, res, res)
+                                   dst, res, self.res_h)
             dst.transition(ST_COMMON)     # 真实 RT→COMMON 屏障（同帧回拷）
             # EMA 状态 ← 输出：同列表紧接着录（单提交，省一次 fence 往返）
             self.ren.copy_tex_to_tex(self.ema, self.depth)
@@ -230,7 +240,7 @@ class D3DDepthPost:
                 dst.transition(ST_RENDER_TARGET)
                 pso = self._pso_for("median", MEDIAN_FS)
                 self.ren.draw_pass(pso, [cur] + ring, self._cb(res), dst,
-                                   res, res)
+                                   res, self.res_h)
                 # ring 保持 PIXEL_SRV 记录（同帧内 SRV→COPY_DEST 由
                 # copy_tex_to_tex 的 transition 发真实屏障）
                 dst.transition(ST_COMMON)
@@ -253,8 +263,8 @@ class D3DDepthPost:
         from .hlsl_depth import BUF_TO_TEX_FS
         pso = self._pso_for("buf_to_tex", BUF_TO_TEX_FS)
         dst_tex.transition(ST_RENDER_TARGET)
-        self.ren.draw_pass(pso, [buf], self._cb(self.res), dst_tex,
-                           self.res, self.res)
+        self.ren.draw_pass(pso, [buf], self._cb(self.res_w), dst_tex,
+                           self.res_w, self.res_h)
         dst_tex.transition(ST_COMMON)
 
     def _tail_submit(self):

@@ -30,13 +30,16 @@ cbuffer CB : register(b0) { float4 P[16]; };
 struct VOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 
 float4 PSMain(VOut i) : SV_Target {
+    // P[0] = (res_w, flat_w, normalize_flag, res_h)；res_h=0 → 方形（旧 cb 兼容）
     float res = P[0].x;
     int flat_w = (int)P[0].y;
+    int res_h = (int)P[0].w;
+    if (res_h <= 0) res_h = (int)res;
     int c;
     float xr, yr;
     if (flat_w > 0) {
         int fl = int(i.pos.y) * flat_w + int(i.pos.x);
-        int rr = int(res) * int(res);
+        int rr = int(res) * res_h;
         c = fl / rr;
         int rem = fl - c * rr;
         int row = rem / int(res);
@@ -48,7 +51,7 @@ float4 PSMain(VOut i) : SV_Target {
         xr = float(ri - c * int(res)) + 0.5;
         yr = i.pos.y;
     }
-    float2 suv = float2(xr / res, yr / res);
+    float2 suv = float2(xr / res, yr / (float)res_h);
     // BGRA8 samples as RGBA semantics on D3D10+ (auto swizzle, .x=R) --
     // same as GL texture().rgb; no manual channel remap needed.
     // NOTE: no const float3 here -- FXC (d3dcompiler_47, this env) emits
@@ -58,7 +61,11 @@ float4 PSMain(VOut i) : SV_Target {
     float v = (c == 0) ? col.x : ((c == 1) ? col.y : col.z);
     float m = (c == 0) ? 0.485 : ((c == 1) ? 0.456 : 0.406);
     float s = (c == 0) ? 0.229 : ((c == 1) ? 0.224 : 0.225);
-    return float4((v - m) / s, 0.0, 0.0, 1.0);
+    float vn = (v - m) / s;
+    // P[0].z：1 = ImageNet 归一化（DepthART 等外部归一化模型）；
+    //          0 = 原样 0..1 RGB（ZipDepth 等图内自带 mean/std 的模型，
+    //              再归一化一次会双重标准化）
+    return float4(P[0].z > 0.5 ? vn : v, 0.0, 0.0, 1.0);
 }
 """
 
@@ -77,13 +84,14 @@ struct VOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 float4 PSMain(VOut i) : SV_Target {
     float2 uv = i.uv;
     float res = P[0].x;
+    float resh = (P[3].w > 0.5) ? P[3].w : res;   // 纵向分辨率（0=方形）
     float grow = P[0].w;
     float best = -1.0;
     for (int dy = -6; dy <= 6; ++dy) {
         for (int dx = -6; dx <= 6; ++dx) {
             if (abs((float)dx) > grow || abs((float)dy) > grow) continue;
             best = max(best, tex_raw.SampleLevel(samp,
-                uv + float2((float)dx, (float)dy) / res, 0).r);
+                uv + float2((float)dx / res, (float)dy / resh), 0).r);
         }
     }
     return float4(best, 0.0, 0.0, 1.0);
@@ -123,6 +131,7 @@ struct VOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 float4 PSMain(VOut i) : SV_Target {
     float2 uv = i.uv;
     float res = P[0].x;
+    float resh = (P[3].w > 0.5) ? P[3].w : res;   // 纵向分辨率（0=方形）
     float sigma = P[1].z;        // pack layout: sigma @ P[1].z
     float2 dir = P[2].yz;        // dirx/diry @ P[2].y/.z
     float acc = 0.0, wsum = 0.0;
@@ -130,7 +139,7 @@ float4 PSMain(VOut i) : SV_Target {
     for (int q = -9; q <= 9; ++q) {
         float fi = (float)q;
         float w = exp(-(fi * fi) / max(1e-6, s2));
-        acc += w * tex_d.Sample(samp, uv + dir * fi / res).r;
+        acc += w * tex_d.Sample(samp, uv + dir * fi / float2(res, resh)).r;
         wsum += w;
     }
     return float4(acc / max(1e-6, wsum), 0.0, 0.0, 1.0);
@@ -151,6 +160,7 @@ struct VOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 float4 PSMain(VOut i) : SV_Target {
     float2 uv = i.uv;
     float res = P[0].x;
+    float resh = (P[3].w > 0.5) ? P[3].w : res;   // 纵向分辨率（0=方形）
     // pack layout: P[0]=(res,lo,hi,w) P[1]=(alpha,aa,sigma,m)
     float lo = P[0].y, hi = P[0].z;
     float alpha = P[1].x, aa = P[1].y;
@@ -159,8 +169,8 @@ float4 PSMain(VOut i) : SV_Target {
     if (aa > 0.001) {
         float w1 = 0.6065, w2 = 0.1353;
         float acc = d, wsum = 1.0;
-        float2 e1 = float2(aa / res, 0.0), e2 = float2(0.0, aa / res);
-        float2 e3 = float2(2.0 * aa / res, 0.0), e4 = float2(0.0, 2.0 * aa / res);
+        float2 e1 = float2(aa / res, 0.0), e2 = float2(0.0, aa / resh);
+        float2 e3 = float2(2.0 * aa / res, 0.0), e4 = float2(0.0, 2.0 * aa / resh);
         acc += w1 * clamp((tex_raw.Sample(samp, uv + e1).r - lo) * sc, 0.0, 1.0);
         acc += w1 * clamp((tex_raw.Sample(samp, uv - e1).r - lo) * sc, 0.0, 1.0);
         acc += w1 * clamp((tex_raw.Sample(samp, uv + e2).r - lo) * sc, 0.0, 1.0);
@@ -248,13 +258,14 @@ struct VOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 float4 PSMain(VOut i) : SV_Target {
     float2 uv = i.uv;
     float res = P[0].x;
+    float resh = (P[3].w > 0.5) ? P[3].w : res;   // 纵向分辨率（0=方形）
     float alpha = P[1].x, aa = P[1].y;
     float d = saturate(tex_raw.Sample(samp, uv).r);
     if (aa > 0.001) {
         float w1 = 0.6065, w2 = 0.1353;
         float acc = d, wsum = 1.0;
-        float2 e1 = float2(aa / res, 0.0), e2 = float2(0.0, aa / res);
-        float2 e3 = float2(2.0 * aa / res, 0.0), e4 = float2(0.0, 2.0 * aa / res);
+        float2 e1 = float2(aa / res, 0.0), e2 = float2(0.0, aa / resh);
+        float2 e3 = float2(2.0 * aa / res, 0.0), e4 = float2(0.0, 2.0 * aa / resh);
         acc += w1 * saturate(tex_raw.Sample(samp, uv + e1).r);
         acc += w1 * saturate(tex_raw.Sample(samp, uv - e1).r);
         acc += w1 * saturate(tex_raw.Sample(samp, uv + e2).r);

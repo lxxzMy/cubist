@@ -12,6 +12,12 @@ MODEL_MAPPING = {
     # 本地 ONNX 档位（内部 id 保持中性）
     "d224": "local/d224",
     "d448": "local/d448",
+    # ZipDepth（ECCV 2026，6.1M 纯卷积，MIT）：EdgePad 384² ONNX 导出。
+    # 图内自带 ImageNet mean/std → prep 必须输出原样 0..1 RGB（见 PREP_RAW_MODELS）。
+    "zip384": "local/zip384",
+    # ZipDepth 宽屏（Nightfall 16:9 解码器微调，MIT）：非方形输入，见 MODEL_SIZES
+    "zipw512": "local/zipw512",     # 512×288
+    "zipw672": "local/zipw672",     # 672×384
     "m4s": "local/m4s",
     "m4m": "local/m4m",
     # 轻量蒸馏档（ViT-Tiny，约 6.2M 参数）。
@@ -106,11 +112,24 @@ MODEL_MAPPING = {
     "DepthPro-Large": "apple/DepthPro-hf"
 }
 
+# 这些模型的 mean/std 在 ONNX 图内，prep 不能再做 ImageNet 归一化（会双重标准化）
+PREP_RAW_MODELS = {"local/zip384", "local/zipw512", "local/zipw672"}
+
+# 非方形模型的输入尺寸 (W, H)；不在表里的模型按 Depth Resolution × 同值（方形）
+MODEL_SIZES = {
+    "local/zip384": (384, 384),
+    "local/zipw512": (512, 288),
+    "local/zipw672": (672, 384),
+}
+
 # 本地可用的深度模型文件：显式 (Depth Model, Depth Resolution) -> runtime/ 文件名。
 # 文件名带分辨率后缀，禁止 basename 猜测（审阅阻断 6）。值为 None = 该组合未导出。
 DEPTH_MODEL_FILES = {
     ("d224", 224): "depth-224.onnx",
     ("d448", 448): "depth-448.onnx",
+    ("zip384", 384): "zipdepth-384.onnx",
+    ("zipw512", 288): "zipdepth_wide_512x288.onnx",
+    ("zipw672", 384): "zipdepth_wide_672x384.onnx",
     ("m4s", 448): "depth-m4s-448.onnx",
     ("m4m", 224): None,
     ("m4m", 448): "depth-m4m-448.onnx",

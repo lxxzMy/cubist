@@ -72,10 +72,18 @@ def find_ort_dir():
     return None
 
 
+def _res_wh(res):
+    """res → (W, H)：int = 方形； (w, h) 元组 = 非方形（16:9 宽屏模型）。"""
+    if isinstance(res, (tuple, list)):
+        return int(res[0]), int(res[1])
+    return int(res), int(res)
+
+
 def open_shim2(ren, prep_tex, res, model_path=None):
     """shim v2 工厂（产品 D3D 主路径 + T3 测试壳共用）。
 
     prep_tex: d3drender.Tex（D3DDepthPrep.prep）；ren: D3DRenderer。
+    res: int（方形 res×res）或 (w, h)（非方形，如 ZipDepth wide 672×384）。
     """
     ort_dir = find_ort_dir()
     if not ort_dir:
@@ -86,7 +94,7 @@ def open_shim2(ren, prep_tex, res, model_path=None):
         import depth as _dm
         model_path = _dm._resolve_onnx_path()
     return DmlZeroCopyShim2(
-        ort_dir, model_path, int(res), ren.get_dev_ptr(),
+        ort_dir, model_path, _res_wh(res), ren.get_dev_ptr(),
         ren.get_queue_ptr(), prep_tex.res, prep_tex.w, prep_tex.h)
 
 
@@ -174,6 +182,16 @@ class DmlZeroCopyShim2:
             ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
             ctypes.c_uint32, ctypes.c_uint32,
             ctypes.c_wchar_p, ctypes.c_size_t]
+        # 非方形（W×H）：新版 DLL 才有；没有就只支持方形
+        self._has_wh = hasattr(self._dll, "d2s_shim2_create_wh")
+        if self._has_wh:
+            self._dll.d2s_shim2_create_wh.restype = ctypes.c_void_p
+            self._dll.d2s_shim2_create_wh.argtypes = [
+                ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_wchar_p,
+                ctypes.c_uint32, ctypes.c_uint32,
+                ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                ctypes.c_uint32, ctypes.c_uint32,
+                ctypes.c_wchar_p, ctypes.c_size_t]
         self._dll.d2s_shim2_run.restype = ctypes.c_int
         self._dll.d2s_shim2_run.argtypes = [
             ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.c_size_t]
@@ -192,9 +210,20 @@ class DmlZeroCopyShim2:
         if not os.path.isfile(dml_dll):
             dml_dll = "DirectML.dll"
         err = ctypes.create_unicode_buffer(512)
-        self._h = self._dll.d2s_shim2_create(
-            ort_dll, dml_dll, model_path, res,
-            dev_ptr, queue_ptr, prep_res_ptr, prep_w, prep_h, err, 512)
+        res_w, res_h = _res_wh(res)
+        self.res_w, self.res_h = res_w, res_h
+        if res_w != res_h and not self._has_wh:
+            raise RuntimeError(
+                "[zc2] 非方形输入需要带 d2s_shim2_create_wh 的新版 "
+                "d2s_dml_shim.dll（请重编 _toolchain/src）")
+        if self._has_wh:
+            self._h = self._dll.d2s_shim2_create_wh(
+                ort_dll, dml_dll, model_path, res_w, res_h,
+                dev_ptr, queue_ptr, prep_res_ptr, prep_w, prep_h, err, 512)
+        else:
+            self._h = self._dll.d2s_shim2_create(
+                ort_dll, dml_dll, model_path, res_w,
+                dev_ptr, queue_ptr, prep_res_ptr, prep_w, prep_h, err, 512)
         if not self._h:
             raise RuntimeError(f"[zc2] shim2 初始化失败: {err.value or '未知'}")
         # ---- 异步执行（流水线用）：单工作线程 + 完成表 ----

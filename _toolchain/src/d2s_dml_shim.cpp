@@ -482,7 +482,8 @@ __declspec(dllexport) void __cdecl d2s_shim_destroy(void* h) {
 // ============================================================================
 
 struct Shim2 {
-  uint32_t res, tw, th;
+  // res = 输入宽 W，rh = 输入高 H（方形模型 rh==res；16:9 宽屏模型 W≠H）
+  uint32_t res, rh, tw, th;
   uint64_t bytes;
   // 注入（引用计数不增——d3drender 管线持有）
   ID3D12Device* dev12 = NULL;
@@ -654,7 +655,7 @@ static HRESULT shim2_gpu_out_init(Shim2* s, wchar_t* err, size_t errlen) {
   D3D12_HEAP_PROPERTIES hp = {}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
   D3D12_RESOURCE_DESC bd = {};
   bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-  bd.Width = (UINT64)s->res * s->res * 4;
+  bd.Width = (UINT64)s->res * s->rh * 4;
   bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1;
   bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
   bd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
@@ -664,7 +665,7 @@ static HRESULT shim2_gpu_out_init(Shim2* s, wchar_t* err, size_t errlen) {
     set_err(err, errlen, "outBuf create failed"); return E_FAIL; }
   D3D12_RESOURCE_DESC td = {};
   td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-  td.Width = s->res; td.Height = s->res; td.DepthOrArraySize = 1;
+  td.Width = s->res; td.Height = s->rh; td.DepthOrArraySize = 1;
   td.MipLevels = 1; td.Format = DXGI_FORMAT_R32_FLOAT;
   td.SampleDesc.Count = 1; td.Flags = D3D12_RESOURCE_FLAG_NONE;
   if (FAILED(s->dev12->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td,
@@ -701,7 +702,7 @@ static HRESULT shim2_gpu_out_init(Shim2* s, wchar_t* err, size_t errlen) {
   if ((st = s->dmlapi->CreateGPUAllocationFromD3DResource(s->outBuf,
                                                           &s->outAlloc)) ||
       (st = s->ort->CreateTensorWithDataAsOrtValue(
-        s->miDml, s->outAlloc, (size_t)s->res * s->res * 4, dims, nd,
+        s->miDml, s->outAlloc, (size_t)s->res * s->rh * 4, dims, nd,
         ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &s->outZC)) ||
       (st = s->ort->CreateIoBinding(s->session, &s->bind)) ||
       (st = s->ort->BindInput(s->bind, s->inName, s->inZC)) ||
@@ -714,21 +715,24 @@ static HRESULT shim2_gpu_out_init(Shim2* s, wchar_t* err, size_t errlen) {
   return S_OK;
 }
 
-__declspec(dllexport) void* __cdecl d2s_shim2_create(
+// 非方形创建（16:9 宽屏模型，如 ZipDepth wide 672×384）：res_w×res_h = 模型输入
+// 空间尺寸；prep flat 纹理须满足 prep_w*prep_h == 3*res_w*res_h 且行距 256 对齐。
+__declspec(dllexport) void* __cdecl d2s_shim2_create_wh(
     const wchar_t* ort_dll, const wchar_t* dml_dll, const wchar_t* model,
-    unsigned int res, void* dev12_ptr, void* queue_ptr, void* prep_res_ptr,
+    unsigned int res_w, unsigned int res_h,
+    void* dev12_ptr, void* queue_ptr, void* prep_res_ptr,
     unsigned int prep_w, unsigned int prep_h, wchar_t* err, size_t errlen) {
   Shim2* s = NULL;
   try {
-    if (!ort_dll || !dml_dll || !model || !res || !dev12_ptr || !queue_ptr ||
-        !prep_res_ptr) { set_err(err, errlen, "bad args"); return NULL; }
-    if ((uint64_t)prep_w * prep_h != (uint64_t)res * res * 3 || prep_w % 64u) {
-      set_err(err, errlen, "prep geometry must be W*H==3*res^2 with W%64==0 (flat CHW)");
+    if (!ort_dll || !dml_dll || !model || !res_w || !res_h || !dev12_ptr ||
+        !queue_ptr || !prep_res_ptr) { set_err(err, errlen, "bad args"); return NULL; }
+    if ((uint64_t)prep_w * prep_h != (uint64_t)res_w * res_h * 3 || prep_w % 64u) {
+      set_err(err, errlen, "prep geometry must be W*H==3*res_w*res_h with W%64==0 (flat CHW, 256-aligned rows)");
       return NULL;
     }
     s = new Shim2();
-    s->res = res; s->tw = prep_w; s->th = prep_h;
-    s->bytes = (uint64_t)res * res * 3 * 4;
+    s->res = res_w; s->rh = res_h; s->tw = prep_w; s->th = prep_h;
+    s->bytes = (uint64_t)res_w * res_h * 3 * 4;
     s->dev12 = (ID3D12Device*)dev12_ptr;
     s->queue = (ID3D12CommandQueue*)queue_ptr;
     s->prep = (ID3D12Resource*)prep_res_ptr;
@@ -775,10 +779,20 @@ __declspec(dllexport) void* __cdecl d2s_shim2_create(
   }
 }
 
+// 方形创建（旧 ABI 保持不变）：等价于 res_h = res_w。
+__declspec(dllexport) void* __cdecl d2s_shim2_create(
+    const wchar_t* ort_dll, const wchar_t* dml_dll, const wchar_t* model,
+    unsigned int res, void* dev12_ptr, void* queue_ptr, void* prep_res_ptr,
+    unsigned int prep_w, unsigned int prep_h, wchar_t* err, size_t errlen) {
+  return d2s_shim2_create_wh(ort_dll, dml_dll, model, res, res, dev12_ptr,
+                             queue_ptr, prep_res_ptr, prep_w, prep_h, err,
+                             errlen);
+}
+
 __declspec(dllexport) int __cdecl d2s_shim2_run(void* h, float* out,
                                                 size_t out_bytes) {
   Shim2* s = (Shim2*)h;
-  if (!s || !out || out_bytes < (size_t)s->res * s->res * 4) return -1;
+  if (!s || !out || out_bytes < (size_t)s->res * s->rh * 4) return -1;
   double t0 = qpc_ms();
   // prep(COMMON) -> COPY_SOURCE 提升回收 -> UAV buffer（与推理同队列 FIFO）
   // allocator 必须先 Reset（只 Reset list 会每次追加 command buffer 内存不回收）
@@ -825,7 +839,7 @@ __declspec(dllexport) int __cdecl d2s_shim2_run(void* h, float* out,
     s->ort->ReleaseValue(ov);
     return 11;
   }
-  memcpy(out, d, (size_t)s->res * s->res * 4);
+  memcpy(out, d, (size_t)s->res * s->rh * 4);
   s->ort->ReleaseValue(ov);
   s->t6[1] = qpc_ms() - t1;
   return 0;

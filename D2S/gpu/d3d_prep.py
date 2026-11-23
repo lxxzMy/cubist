@@ -23,17 +23,30 @@ class D3DDepthPrep:
     color 纹理换代（尺寸变化）时 set_frame 内重建。
     """
 
-    def __init__(self, ren, res=224, flat=True):
+    def __init__(self, ren, res=224, flat=True, normalize=True):
         self.ren = ren
-        self.res = res
+        # res：int = 方形 res×res；(w, h) = 非方形（16:9 宽屏模型，如 672×384）
+        if isinstance(res, (tuple, list)):
+            self.res_w, self.res_h = int(res[0]), int(res[1])
+        else:
+            self.res_w = self.res_h = int(res)
+        self.res = self.res_w          # 兼容旧调用（当方形用的那些地方）
         self.flat = flat
+        # normalize=True：prep 做 ImageNet mean/std（DepthART 等"外部归一化"
+        # 模型）；False：原样输出 0..1 RGB（ZipDepth 等 mean/std 在图内的
+        # 模型，再做一次就双重标准化）。
+        self.normalize = bool(normalize)
         self.flat_w = FLAT_W if flat else 0
         if flat:
+            n = self.res_w * self.res_h * 3
+            if n % FLAT_W:
+                raise ValueError(f"prep flat 布局要求 3*W*H 能被 {FLAT_W} 整除"
+                                 f"（{self.res_w}x{self.res_h}）")
             self.prep_w = FLAT_W
-            self.prep_h = (res * res * 3) // FLAT_W
+            self.prep_h = n // FLAT_W
         else:
-            self.prep_w = res * 3
-            self.prep_h = res
+            self.prep_w = self.res_w * 3
+            self.prep_h = self.res_h
         self.prep = ren.create_tex(self.prep_w, self.prep_h, FMT_R32F,
                                    renderable=True)
         self._color = None
@@ -42,6 +55,11 @@ class D3DDepthPrep:
         self._pso = ren.create_pso(
             "depth_prep", self._vs, compile_shader("depth_prep", PREP_FS),
             FMT_R32F)
+
+    def consts(self):
+        """prep pass 的 cbuffer：[res_w, flat_w, normalize_flag, res_h]。"""
+        return [float(self.res_w), float(self.flat_w),
+                1.0 if self.normalize else 0.0, float(self.res_h)]
 
     def set_frame(self, bgra_u8):
         """BGRA HWC uint8 帧上传（尺寸变化时换代重建 upload 对）。
@@ -72,8 +90,7 @@ class D3DDepthPrep:
         self._color.transition(ST_PIXEL_SRV)
         self.prep.state = dr.ST_COMMON
         self.prep.transition(ST_RENDER_TARGET)
-        self.ren.draw_pass(self._pso, [self._color],
-                           [float(self.res), float(self.flat_w), 0.0, 0.0],
+        self.ren.draw_pass(self._pso, [self._color], self.consts(),
                            self.prep, self.prep_w, self.prep_h)
         self.prep.state = dr.ST_COMMON
         self.ren.submit()
