@@ -45,9 +45,13 @@ float4 PSMain(VOut i) : SV_Target {
 }
 """
 
-# 深度图模式（viewer.depth_prog：spectral_r 近红远蓝）
+# 深度图模式：直接显示**模型原始深度**（post.raw，224²），线性上采样到
+# 当前分辨率；按本帧 P2/P98（stats t7 的 g_stats[0]/[1]）归一化到 [0,1] 再
+# spectral 上色（近红远蓝）。stats 未绑定时（离屏工具/测试）回退为直接
+# saturate(raw)（测试喂的就是 0..1）。
 DEPTH_MAP_FS = """
 Texture2D tex_depth : register(t0);
+StructuredBuffer<uint> g_stats : register(t7);
 SamplerState samp : register(s0);
 cbuffer CB : register(b0) { float4 P[16]; };
 
@@ -73,7 +77,10 @@ float4 PSMain(VOut i) : SV_Target {
     // D3D i.uv.y already matches texture space (screen top = v 0) --
     // GL depth_prog needed a flip because GL screen y is bottom-up;
     // D3D must NOT flip (vertical-flip bug found by real-frame parity).
-    float depth = tex_depth.Sample(samp, i.uv).r;
+    float raw = tex_depth.Sample(samp, i.uv).r;
+    float lo = asfloat(g_stats[0]), hi = asfloat(g_stats[1]);
+    float depth = (hi > lo + 1e-6)
+        ? saturate((raw - lo) / (hi - lo)) : saturate(raw);
     float3 color = spectral_r_ultrafast(depth);
     return float4(color, 1.0);
 }

@@ -325,13 +325,15 @@ class D3DDisplay:
 
     # ---- draw（录制，不 present） ---------------------------------------
     def draw(self, mode, color_tex=None, depth_tex=None, src_w=None,
-             src_h=None, out=None, overlay=None):
+             src_h=None, out=None, overlay=None, stats=None):
         """录一帧显示。mode: half_sbs|full_sbs|interleaved|passthrough|
         depth_map。out=None → backbuffer（随后 present）；out=Tex → 离屏
         （不 present，调用方 readback）。
 
         src_w/src_h = 采集源尺寸（视口宽高比语义）；tex 内容全用归一化 uv。
         overlay: 回调（无参），在显示 pass 之后、同帧内录制 overlay/cursor。
+        stats: D3DStats——depth_map 模式用它把原始深度按本帧 P2/P98
+        归一化（shader 读 t7）；其它模式忽略。
         """
         win_w, win_h = self.w, self.h
         res = depth_tex.w if depth_tex is not None else self.p.get("res", 224)
@@ -365,7 +367,10 @@ class D3DDisplay:
         if mode in ("passthrough", "depth_map"):
             vp = self.single_viewport(src_w, src_h)
             self.ren.draw_pass(pso, srvs, self._consts(vp, 0.0, 0.0, res),
-                               target, win_w, win_h, viewport=vp)
+                               target, win_w, win_h, viewport=vp,
+                               stats=(stats.stats if (mode == "depth_map"
+                                                      and stats is not None)
+                                      else None))
         elif mode == "interleaved":
             vp = self.single_viewport(src_w, src_h)
             ipd = self.p.get("ipd_uv", 0.064)

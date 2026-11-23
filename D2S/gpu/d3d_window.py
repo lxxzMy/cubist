@@ -483,11 +483,16 @@ class D3DStereoWindow:
         self._draw_hud()
         self._draw_cursor()
 
-    def render(self, src_w=None, src_h=None, depth_tex=None):
+    def render(self, src_w=None, src_h=None, depth_tex=None, stats=None):
         """录一帧（显示 pass + overlay/光标），不 present。
 
         depth_tex：流水线模式下传入与颜色同帧的那张显示深度（post 的
         disp_depth 乒乓）；None = 当前链输出（串行模式）。
+        stats: D3DStats——Depth Map 模式用它按本帧 P2/P98 归一化原始深度。
+
+        Depth Map 模式**固定显示模型原始深度**（post.raw，224²，线性上采样
+        到当前分辨率），与 depth_tex 参数无关（2026-11-23 用户定案：深度图
+        看最原始的那张，不看归一化/AA/EMA 之后的）。
         """
         self._render_seq += 1
 
@@ -495,11 +500,13 @@ class D3DStereoWindow:
             self._draw_hud()
             self._draw_cursor()
 
+        if self._mode == "depth_map":
+            depth_tex = self.post.raw
         self.disp.draw(self._mode, self._color_tex,
                        self.post.depth if depth_tex is None else depth_tex,
                        src_w=src_w or self._texture_size[0],
                        src_h=src_h or self._texture_size[1],
-                       overlay=_overlay)
+                       overlay=_overlay, stats=stats)
 
     def present(self, nowait=False):
         # D2S_SYNC1=1：不透明平面（alpha=255）时必须让翻转对齐 VBlank，

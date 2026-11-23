@@ -19,7 +19,7 @@ Windows 10/11 · Direct3D 12 · DirectML，纯 GPU 零拷贝管线（采集纹�
   | `Full-SBS` | 左右全宽（每眼一份完整画面并排） |
   | `Half-TAB` | 上下半高 |
   | `Full-TAB` | 上下全高 |
-  | `Depth Map` | 深度图调试输出（spectral 上色） |
+  | `Depth Map` | 深度图调试输出：直接显示**模型原始深度**（224²，线性上采样到当前分辨率，按本帧 P2/P98 归一化 + spectral 上色） |
 
 - **呈现**：flip 模型交换链（3 缓冲）+ 分层覆盖层；`PIPELINE` 成对流水线把每帧 3 个 GPU 同步点压掉，颜色与深度严格同帧配对。
 - **切换**：托盘菜单 / 设置面板随时切 2D↔3D；2D 时窗口隐藏（原生桌面）。
@@ -102,7 +102,7 @@ GL 回退/工具额外需要 `moderngl glfw PyOpenGL PyOpenGL-accelerate`。见 
 - 深度模型（DepthART MobileNetV4-M-slim-SPF）为 **CC BY-NC 4.0**：可随本免费项目分发，但**不得商用**；需要商用请自行替换为许可允许的模型（如 Depth-Anything-V2-Small Apache-2.0 / Distill-Any-Depth-Small MIT）。
 - 「采集屏 / 输出屏」必须位于**同一块显卡**（零拷贝前提）；跨卡会在启动时弹窗提示并回退为同屏采集。
 - AR 眼镜的「3840×2160 渲染、眼镜纵向压回 3840×1080」用法需要显示端支持 2160p 输入；此时输出格式应选 `Half-SBS`。
-- `Depth Map` 是调试输出：224×224 深度铺满窗口、spectral 四段色表，在暗色文字界面上会呈现大块平滑色带，属正常现象。
+- `Depth Map` 是调试输出：显示的是**模型原始深度**（224×224，线性上采样，未经归一化/AA/EMA 链处理），spectral 四段色表；暗色文字界面上会呈现大块色块，属正常现象。
 - 环境变量开关见 `docs/env-flags.md`；排障日志在 `D2S/logs/`（不入库）。
 
 ## 许可证与致谢

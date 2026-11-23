@@ -1768,7 +1768,7 @@ def _main_d3d(mode="Viewer"):
                     print(f"[tear] 探针异常: {_te!r}", flush=True)
         # 5) 显示 + present（同帧一条龙）
         window.attach_color(src, *cap["zcc"].size)
-        window.render()
+        window.render(stats=cap["stats"])
         window.present()
         globals()["_present_t"] = time.perf_counter()
         _signal_consumed(idx)
@@ -1990,7 +1990,7 @@ def _main_d3d(mode="Viewer"):
             _pl["pair"] = None
             _src = cap["ring"][_didx]
             window.attach_color(_src, *cap["zcc"].size)
-            window.render(depth_tex=_ddepth)
+            window.render(depth_tex=_ddepth, stats=_st)
             _pbb = ren.cur_bb()
             _pok = window.present(nowait=True)
             if _pl.get("probe"):
@@ -2034,7 +2034,7 @@ def _main_d3d(mode="Viewer"):
             _didx, _ddepth, _ = _pl["last_pair"]
             cap["zcc"].avoid = _didx
             window.attach_color(cap["ring"][_didx], *cap["zcc"].size)
-            window.render(depth_tex=_ddepth)
+            window.render(depth_tex=_ddepth, stats=_st)
             window.present(nowait=True)
             globals()["_present_t"] = time.perf_counter()
         # 3)【CPU 输出模式】新采集帧 → prep + 投递推理（不等待）。只在
