@@ -695,7 +695,7 @@ class SettingsDialog(tk.Tk):
         self._vars["Convergence Tau"] = tk.DoubleVar(value=2.0)
 
         # 「画质」卡片已整块隐藏：里面的抗锯齿/平滑帧数都是产品定值，没有可调项。
-        # 抗锯齿 σ 是代码里定死的（utils.AA_KNOB，2026-11-24 用户定案 1；语义 =
+        # 抗锯齿 σ 是代码里定死的（utils.AA_KNOB，2026-11-24 用户定案 2；语义 =
         # 【两个方向里较大的 σ】，单位深度纹素，另一方向按每眼视口纵横比缩小，
         # 公式见 main._aa_sigma_texels），不读也不写 yaml。
         # 深度 EMA 时间常数已定死 80ms（utils 常量），面板不再暴露
