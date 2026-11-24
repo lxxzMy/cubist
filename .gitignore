@@ -18,9 +18,9 @@ dist/
 _dml/
 _toolchain/dl/
 *.onnx
-# 例外：随仓库分发的深度模型（CC BY-NC 4.0，见 models/README.md）
+# 例外：随仓库分发的深度模型（MIT，见 models/README.md）
 !models/
-!models/depth-224.onnx
+!models/zipdepth_wide_512x288.onnx
 *.trt
 *.engine
 

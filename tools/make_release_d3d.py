@@ -7,10 +7,13 @@
   2. 剔除用户残留：settings.yaml.bak*、logs 内容
   3. 调 package_shim（全量重编 app/**/*.pyc + runtime DLL：shim v2 /
      d3drender.dll / dxcompiler+dxil），并清理孤儿 pyc
-  4. 补资源：app/data/rootsig.blob（D3D12 模块的 blob 缓存）
+  4. 补资源：app/data/rootsig.blob（D3D12 模块的 blob 缓存）、app/settings.yaml.default
   5. 版本单源：NOTICE.txt 头
   6. csc 重编 立体派.exe
-  7. 自检：pyc/DLL 清单、启动器、settings 默认
+  7. 自检：pyc/DLL 清单、启动器、产品模型 + 署名/许可文件、settings 模板
+
+归档前（不在本脚本里做，避免动到在用的包）：把 app/settings.yaml 换成
+settings.yaml.default 的副本，免得把开发机调参带给用户。
 
 用法：
     python tools/make_release_d3d.py            # 就地重建 1.5-d3d
@@ -94,13 +97,16 @@ def add_resources():
     pairs = [
         (os.path.join(D2S, "data", "rootsig.blob"),
          os.path.join(app, "data", "rootsig.blob")),
+        # 设置模板跟着源码走（不碰 app/settings.yaml：那是包的使用者的配置）
+        (os.path.join(D2S, "settings.yaml.default"),
+         os.path.join(app, "settings.yaml.default")),
     ]
     for src, dst in pairs:
         if not os.path.isfile(src):
             raise SystemExit(f"[x] 缺资源: {src}")
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copy2(src, dst)
-    _log("[4] 资源补齐 data/rootsig.blob")
+    _log("[4] 资源补齐 data/rootsig.blob + settings.yaml.default")
 
 
 def stamp_version():
@@ -158,7 +164,9 @@ def self_check():
                 "app/icon.ico", "app/data/rootsig.blob",
                 "app/settings_dialog.pyc", "app/gpu/d3d_window.pyc",
                 "app/gpu/d3d_stats.pyc", "app/gpu/hlsl_stats.pyc",
-                "models/depth-224.onnx", "立体派.exe"):
+                # 发布包只带产品模型（model_catalog.PRODUCT_MODEL）及其署名/许可
+                "models/zipdepth_wide_512x288.onnx", "models/README.md",
+                "models/LICENSE-ZipDepth-MIT.txt", "立体派.exe"):
         p = os.path.join(DST, rel.replace("/", os.sep))
         e = os.path.exists(p)
         _log(f"  {'[v]' if e else '[x]'} {rel}")

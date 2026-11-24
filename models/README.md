@@ -1,35 +1,75 @@
-# 深度模型（depth-224.onnx）
+# 深度模型说明
 
-本目录的 `depth-224.onnx` 是 **DepthART** 项目 `MobileNetV4-M-slim-SPF`（224 输入）权重的
-ONNX 导出，用于 Cubist 的单目深度推理。
+本目录只有一个模型文件：`zipdepth_wide_512x288.onnx`。它是 Cubist 使用的**唯一深度模型**——
+单目相对深度估计：每帧把采集画面缩放到 512×288 送进去，在 GPU 上经 DirectML 推理，
+输出直接留在显存里做 3D 渲染的深度后处理。程序固定加载它，设置面板不提供模型选择。
 
-## 许可：CC BY-NC 4.0（非商用）
+## 文件
 
-- 本模型**不是**本项目的 Apache-2.0 代码，按 **Creative Commons Attribution-NonCommercial 4.0
-  International（CC BY-NC 4.0）** 分发：
-  <https://creativecommons.org/licenses/by-nc/4.0/>
-  完整法律文本见同目录 `LICENSE-CC-BY-NC-4.0.txt`。
-- **禁止商业使用**（NonCommercial）：不得将本模型用于主要指向商业利益或金钱报酬的用途，
-  也不得随商业产品分发。Cubist 本项目为免费、非商业项目，因此可以随本仓库分发该模型。
-- 本仓库的**源代码**仍是 Apache-2.0（见根目录 `LICENSE`）；该许可不适用于本模型文件。
+| 项 | 值 |
+|---|---|
+| 文件名 | `zipdepth_wide_512x288.onnx`（24,625,797 字节） |
+| SHA-256 | `197d598f50ee3270b12831096dbab260c6bd5979bab13b87f01a28fad0268274` |
+| 输入 | 名为 `image`，`float32 [1, 3, 288, 512]`（NCHW），RGB，取值 0..1；ImageNet 均值/方差已在模型图内，不要再做归一化 |
+| 输出 | 名为 `depth`，`float32 [1, 1, 288, 512]`，相对逆深度：值越大越近，没有固定的尺度与零点 |
+| 规模 | 约 610 万参数，纯卷积，无注意力算子 |
+| 许可 | MIT，全文见同目录 `LICENSE-ZipDepth-MIT.txt` |
 
-## 署名（Attribution）
+## 它来自哪里
 
-- DepthART: "DepthART: Depth Anything Rethought for Tiny Models"
-  - 代码/项目主页：<https://github.com/xuefeng-cvr/DepthART>
-  - 权重发布：<https://huggingface.co/Fengxue93/DepthART>
-  - 原始文件：`onnx/relative_mnv4m_slim_spf_224_default.onnx`
-  - Copyright (c) 2026 DepthART Authors；DepthART 自有材料为 CC BY 4.0。
-- 教师模型：**Depth Anything V2-Large**（`depth-anything/Depth-Anything-V2-Large`），
-  其权重为 CC BY-NC 4.0：<https://creativecommons.org/licenses/by-nc/4.0/>。
-  DepthART 官方说明其 checkpoints 使用 Depth Anything V2-L 生成的监督训练，
-  且不包含在 DepthART 的 CC BY 4.0 授权范围内。
+- **ZipDepth**（基础网络与权重）：Fabio Tosi、Luca Bartolomei、Matteo Poggi、Stefano Mattoccia，
+  University of Bologna，ECCV 2026，"ZipDepth: Bringing Lightweight Zero-Shot Monocular Depth
+  Anywhere, on Any Device"。<https://github.com/fabiotosi92/ZipDepth>，MIT，
+  Copyright (c) 2026 Fabio Tosi。
+- **Widescreen EdgePad**（宽屏微调、图优化与 ONNX 导出）：Nightfall 团队。在 ZipDepth 的标准
+  权重 `zipdepth_base` 上只训练了解码器（610 万参数中的 154,005 个，分两个阶段共 6000 步），
+  让同一套权重适配包括 16:9 在内的多种输入尺寸、逐帧更稳；编码器仍是 ZipDepth 的。
+  训练标签来自原版 EdgePad-384 自己的输出、Video Depth Anything Small 和 Marigold V2
+  （后两者为 Apache-2.0，只用于生成标签，不随模型分发）。
+  发布页：<https://github.com/tB0nE/nightfall/releases/tag/edgepad-models-2026-10-08>，MIT，
+  Copyright (c) 2026 The Nightfall authors。
 
-## 修改说明（Indicate changes）
+## 本项目做了什么、没做什么
 
-相对 DepthART 发布的原始权重/导出，本项目：
-1. 直接使用官方 ONNX 导出 `relative_mnv4m_slim_spf_224_default.onnx`（未改权重）；
-2. 以固定 224×224、RGB、ImageNet 归一化输入运行（与官方一致）；
-3. 在本仓库中以文件名 `depth-224.onnx` 分发。
+- **没有修改模型文件**：这里的文件与上述发布页的同名资产逐字节一致（SHA-256 相同）。
+- 只做推理。模型的原始输出每帧按 P2/P98 两个分位重新标定到 [0.02, 0.98]，再做各向异性高斯
+  平滑与 80 ms 的时域 EMA，然后用于 3D 合成——这些都发生在显存里，不改动模型本身。
+- 实测（GTX 1650，DirectML）：单帧推理约 7 ms；1080p 60 fps 内容下，从桌面合成完成到
+  我们提交显示约 11 ms（中位数）。
 
-若你二次分发本模型，请保留本文件与 `LICENSE-CC-BY-NC-4.0.txt`，并保留上述署名与修改说明。
+## 许可
+
+- 模型按 **MIT License** 分发，全文见 `LICENSE-ZipDepth-MIT.txt`。这份文本与发布页随附的
+  `LICENSE` 逐字节一致，保留了其中的两行版权声明（ZipDepth / Nightfall 各一行）。
+- MIT 允许使用、修改与分发（包括商业使用），条件是随附版权声明与许可全文。
+  **再分发这个模型时，请保留本文件和 `LICENSE-ZipDepth-MIT.txt`。**
+- 如实说明：ZipDepth 官方 README 写明，它的权重是用 Depth Anything V2 **Large** 生成的伪深度
+  蒸馏训练的，而该教师模型的权重是 CC BY-NC 4.0。ZipDepth 作者以 MIT 许可在同一仓库发布
+  权重，没有对权重附加任何限制。本项目照此分发，不对此另作主张。
+
+## 给开发者
+
+`D2S/model_catalog.py` 的 `LOCAL_MODELS` 里还登记了几个对比用的档位（DepthART 224/448、
+ZipDepth 384、ZipDepth 宽屏 672×384），它们**不随仓库 / 发布包**。需要对比时，把对应的
+ONNX 放进 `models/` 或 `runtime/`，再用环境变量 `D2S_DEPTH_MODEL=<键>` 临时切换；
+不设置时固定使用本模型。
+
+---
+
+# Depth model
+
+`zipdepth_wide_512x288.onnx` is the only depth model Cubist uses (monocular relative depth,
+512×288 input, DirectML inference on the GPU). The application always loads this file.
+
+- **Input** `image`: float32 `[1, 3, 288, 512]` (NCHW), RGB in 0..1 — ImageNet mean/std are
+  applied inside the graph. **Output** `depth`: float32 `[1, 1, 288, 512]`, relative inverse
+  depth (larger = nearer).
+- **Origin**: [ZipDepth](https://github.com/fabiotosi92/ZipDepth) (University of Bologna,
+  ECCV 2026; MIT, Copyright (c) 2026 Fabio Tosi) — **Widescreen EdgePad** fine-tune and ONNX
+  export by the Nightfall authors
+  ([release `edgepad-models-2026-10-08`](https://github.com/tB0nE/nightfall/releases/tag/edgepad-models-2026-10-08);
+  MIT, Copyright (c) 2026 The Nightfall authors).
+- **Unmodified**: byte-identical to the upstream asset,
+  SHA-256 `197d598f50ee3270b12831096dbab260c6bd5979bab13b87f01a28fad0268274`.
+- **License**: MIT. The full text, including both copyright lines, is in
+  `LICENSE-ZipDepth-MIT.txt`; keep it together with the model when redistributing.
