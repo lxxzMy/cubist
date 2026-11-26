@@ -1,7 +1,10 @@
 # Cubist（立体派）
 
 把普通 2D 桌面/视频/游戏实时转换成 3D 画面，输出到 3D 显示器、偏光屏和 AR 眼镜。
-Windows 10/11 · Direct3D 12 · DirectML，纯 GPU 零拷贝管线（采集纹理 → 推理 → 深度链 → 上屏全程不出显存）。
+Windows 10/11 · Direct3D 12 · DirectML。
+
+- **同屏原生 2D/3D 即时切换**：采集哪块屏，就把 3D 画面投回哪块屏；关掉 3D 时看到的就是原生桌面，画面不经过任何处理，随时再切回来。
+- **颜色帧全链路显存常驻**：从采集纹理、预处理、合成到上屏，画面不经过 CPU，也不限 GPU 厂商。
 
 > **免费的纯非商业开源项目**：代码 Apache-2.0；随仓库分发的深度模型为 **ZipDepth（Widescreen EdgePad 版，MIT）**，
 > 详见 `models/README.md`。仓库含源码 + 模型，不含 Python 运行时和预编译 DLL（见「运行前提」）。
@@ -10,8 +13,8 @@ Windows 10/11 · Direct3D 12 · DirectML，纯 GPU 零拷贝管线（采集纹�
 
 ## 能力
 
-- **输入**：整屏 DXGI Desktop Duplication（DDA），零拷贝共享纹理；可同时指定「采集屏」与「输出屏」（AB 屏分离，适合 AR 眼镜）。
-- **深度**：单目深度模型 **ZipDepth Widescreen EdgePad（512×288，MIT，随仓库分发）**经 DirectML 推理，输出在 GPU 端直接进深度后处理链：每帧按 P2/P98 重标定 → 各向异性高斯 AA → 80 ms 时域 EMA；切换画面时按颜色直方图判切并重置 EMA。模型登记在 `D2S/model_catalog.py` 的 `LOCAL_MODELS`（文件 / 输入尺寸 / 预处理方式）；产品模型固定为 `zipw512`（`PRODUCT_MODEL`），设置面板不提供模型选择。
+- **输入**：整屏 DXGI Desktop Duplication（DDA），共享纹理；默认采集屏就是输出屏（同屏），也可分别指定「采集屏」与「输出屏」（AB 屏分离，适合 AR 眼镜）。
+- **深度**：单目深度模型 **ZipDepth Widescreen EdgePad（512×288，MIT，随仓库分发）**经 DirectML 推理；深度图经后处理链（每帧按 P2/P98 重标定 → 各向异性高斯 AA → 80 ms 时域 EMA；切换画面时按颜色直方图判切并重置 EMA）后用于 3D 合成。模型登记在 `D2S/model_catalog.py` 的 `LOCAL_MODELS`（文件 / 输入尺寸 / 预处理方式）；产品模型固定为 `zipw512`（`PRODUCT_MODEL`），设置面板不提供模型选择。
 - **输出格式**：
 
   | 格式 | 说明 |
@@ -24,7 +27,7 @@ Windows 10/11 · Direct3D 12 · DirectML，纯 GPU 零拷贝管线（采集纹�
   | `Depth Map` | 深度图调试输出：显示 **3D 渲染实际使用的最终深度图**（已重标定与平滑，线性上采样到当前分辨率；连续 spectral 色表，远 = 靛蓝、近 = 暗红） |
 
 - **呈现**：flip 模型交换链（3 缓冲）+ 分层覆盖层；`PIPELINE` 成对流水线把每帧 3 个 GPU 同步点压掉，颜色与深度严格同帧配对。
-- **切换**：托盘菜单 / 设置面板随时切 2D↔3D；2D 时窗口隐藏（原生桌面）。
+- **切换**：托盘菜单 / 设置面板随时切 2D↔3D；2D 时窗口隐藏，看到的就是原生桌面。
 
 ## 架构（D3D12 主路径）
 
@@ -37,6 +40,10 @@ DDA（IDXGIOutputDuplication）
                       └─ 显示 pass（DIBR/Interleaved，逐眼视口 + scissor）
                            └─ flip swapchain present
 ```
+
+颜色和深度走的是两条不同的路径。颜色纹理由显示 pass 直接采样环纹理，从采集到上屏不回读 CPU。
+推理得到的深度图（512×288）默认先回到 CPU 一次，再上传进深度后处理链；让它留在显存里的纯 GPU 输出模式
+已经实现，但默认关闭。
 
 关键文件：
 
@@ -123,9 +130,12 @@ GL 回退/工具额外需要 `moderngl glfw PyOpenGL PyOpenGL-accelerate`。见 
 ### English
 
 Cubist converts ordinary 2D Windows desktops, videos and games into real-time stereoscopic 3D
-for 3D monitors, polarized displays and AR glasses. Windows 10/11, Direct3D 12 + DirectML,
-fully GPU-resident zero-copy pipeline (DDA capture → shared ring textures → prep → DML inference →
-depth post-chain → per-eye display pass → flip present).
+for 3D monitors, polarized displays and AR glasses. Windows 10/11, Direct3D 12 + DirectML.
+
+- **Same-screen 2D/3D switching**: capture a display and project the 3D image back onto it.
+  Switch 3D off and you are looking at the native desktop again, untouched — switch back at any time.
+- **Colour frames stay in video memory end to end**: capture texture → prep → compositing → present,
+  never through the CPU, on any DirectX 12 GPU.
 
 This is a **free, non-commercial** open-source project. The source code is licensed under
 Apache-2.0; the bundled depth model (`models/zipdepth_wide_512x288.onnx` — ZipDepth, Widescreen
