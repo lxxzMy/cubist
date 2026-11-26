@@ -49,6 +49,11 @@ _SYNC1 = os.environ.get("D2S_SYNC1") == "1"
 # D2S_COLORKEY=1：颜色键分层（实测在本机仍会被提升成独立翻转 → 撕裂回来了，
 # 所以默认不用；留作对照/其它机器）。
 _COLORKEY_ON = os.environ.get("D2S_COLORKEY") == "1"
+# D2S_ALPHA254=1：回退到旧做法——整窗不透明度设成 254（0.4% 透明）来强制
+# DWM 合成。默认不开：窗口完全不透明（alpha=255），改用"窗口区域右下角开
+# 1 像素洞"达到同一目的（见 _set_opaque_hole）。
+_ALPHA254 = os.environ.get("D2S_ALPHA254") == "1"
+RGN_ERROR, RGN_DIFF = 0, 4
 
 _MODE_MAP = {
     "Half-SBS": "half_sbs", "Full-SBS": "full_sbs",
@@ -121,6 +126,50 @@ def _set_exstyle(hwnd, add=0, clear=0):
     setw.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
     st = get(ctypes.c_void_p(hwnd), GWL_EXSTYLE)
     setw(ctypes.c_void_p(hwnd), GWL_EXSTYLE, (st | add) & ~clear)
+
+
+# 窗口区域操作（gdi32/user32）。句柄是 64 位，参数类型必须在模块级声明一次：
+# 热路径里现造 ctypes 类型会产生垃圾（GC 停顿），不声明又会被默认的 int 截断。
+_gdi32.CreateRectRgn.restype = ctypes.c_void_p
+_gdi32.CreateRectRgn.argtypes = [ctypes.c_int] * 4
+_gdi32.CombineRgn.restype = ctypes.c_int
+_gdi32.CombineRgn.argtypes = [ctypes.c_void_p] * 3 + [ctypes.c_int]
+_gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+_user32.SetWindowRgn.restype = ctypes.c_int
+_user32.SetWindowRgn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
+_user32.GetWindowRgn.restype = ctypes.c_int
+_user32.GetWindowRgn.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+
+
+def _set_opaque_hole(hwnd, w, h):
+    """窗口区域 = 整窗 − 右下角 1 像素。成功返回 True。
+
+    DWM 只会把"完整盖住输出、且完全不透明"的窗口提升成直扫（独立翻转 /
+    叠加平面直接扫描我们的 flip 缓冲），那条路在本机实测怎么对齐都会撕。
+    窗口一旦带洞就不再是完整矩形，DWM 只能逐帧把它合成进自己的图，再在
+    消隐期整张切换——所以不撕，而窗口本身可以保持完全不透明（alpha=255）。
+    SetWindowRgn 成功后 hrgn 归系统所有，不能再删它。
+    """
+    full = _gdi32.CreateRectRgn(0, 0, int(w), int(h))
+    hole = _gdi32.CreateRectRgn(int(w) - 1, int(h) - 1, int(w), int(h))
+    dst = _gdi32.CreateRectRgn(0, 0, 0, 0)
+    ok = False
+    if _gdi32.CombineRgn(dst, full, hole, RGN_DIFF) != RGN_ERROR:
+        ok = bool(_user32.SetWindowRgn(hwnd, dst, 1))
+    _gdi32.DeleteObject(full)
+    _gdi32.DeleteObject(hole)
+    if not ok:
+        _gdi32.DeleteObject(dst)
+    return ok
+
+
+def _window_region_missing(hwnd):
+    """窗口当前没有区域（完整矩形）→ True。"""
+    tmp = _gdi32.CreateRectRgn(0, 0, 0, 0)
+    try:
+        return _user32.GetWindowRgn(hwnd, tmp) == RGN_ERROR
+    finally:
+        _gdi32.DeleteObject(tmp)
 
 
 class D3DStereoWindow:
@@ -201,6 +250,7 @@ class D3DStereoWindow:
         # + 全 1 alpha）——语义上是"半透明平面"，DWM 同样必须合成，但视觉
         # 完全不透明，彻底去掉 alpha=254。此时窗口不能是 LAYERED（DComp
         # 与分层窗口互斥），改 NOREDIRECTIONBITMAP + WM_NCHITTEST 穿透。
+        self._hole = False
         if _DCOMP:
             _set_exstyle(self.hwnd, WS_EX_NOREDIRECTIONBITMAP |
                          WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
@@ -208,18 +258,29 @@ class D3DStereoWindow:
         else:
             _set_exstyle(self.hwnd, WS_EX_LAYERED | WS_EX_TRANSPARENT |
                          WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, WS_EX_APPWINDOW)
-            # 【颜色键，不是 alpha】用 LWA_COLORKEY 而不是 LWA_ALPHA：
-            # alpha<255 会让整窗 0.4% 透明（能透过去看到底下的东西）；
-            # 颜色键则"只有等于 key 的像素透明、其余 100% 不透明"，而分层
-            # 窗口 + 颜色键在 Windows 上**必须走 DWM 合成**（无法提升为 MPO
-            # 独立翻转），滚动撕裂的根因同样被去掉。
-            # key = RGB(1,2,3)（COLORREF 0x00BBGGRR）：视频里几乎不出现，
-            # 万一出现也只丢一个近黑像素，肉眼不可见。
-            _user32.SetLayeredWindowAttributes(
-                ctypes.c_void_p(self.hwnd),
-                _COLORKEY if _COLORKEY_ON else 0,
-                0 if _COLORKEY_ON else 254,
-                0x1 if _COLORKEY_ON else 0x2)   # 默认仍是 alpha=254
+            # 【默认：完全不透明 + 窗口区域右下角 1 像素洞】alpha=255 时 DWM
+            # 会把整屏不透明窗口提升成直扫，怎么对齐都会撕；给窗口区域开一个
+            # 像素的洞，它就只能是普通窗口，必须逐帧合成——不再直扫，画面
+            # 也就完全不透明（见 _set_opaque_hole）。只在同屏覆盖层上用。
+            # 回退：D2S_ALPHA254=1（整窗 alpha=254，0.4% 透明）；窗口化
+            # 查看器也沿用 254。
+            # _SYNC1 / _COLORKEY 只是 A/B 实验开关（默认关）：
+            #   _SYNC1   = 完全不透明 + Present(sync=1)，不开洞（会撕）；
+            #   _COLORKEY = 颜色键分层（本机仍被提升成直扫，会撕）。
+            self._hole = (self.same_screen and not _ALPHA254
+                          and not _SYNC1 and not _COLORKEY_ON)
+            if _COLORKEY_ON:
+                # key = RGB(1,2,3)（COLORREF 0x00BBGGRR）：只有等于它的像素透明
+                _user32.SetLayeredWindowAttributes(
+                    ctypes.c_void_p(self.hwnd), _COLORKEY, 0, 0x1)
+            else:
+                _alpha = 255 if (self._hole or _SYNC1) else 254
+                _user32.SetLayeredWindowAttributes(
+                    ctypes.c_void_p(self.hwnd), 0, _alpha, 0x2)
+            if self._hole:
+                self._apply_opaque_hole()
+                print("[view] 覆盖层完全不透明：alpha=255 + 窗口区域右下角 1px 洞",
+                      flush=True)
         if show:
             self.show()
 
@@ -282,11 +343,22 @@ class D3DStereoWindow:
     def set_title(self, t):
         _user32.SetWindowTextW(ctypes.c_void_p(self.hwnd), str(t))
 
+    def _apply_opaque_hole(self, w=None, h=None):
+        """按当前窗口尺寸重设"整窗 − 右下角 1 像素"的区域（只在默认不透明模式生效）。
+        窗口尺寸变了区域不会自己跟着变（洞会留在旧角落），所以尺寸一变就要重设。"""
+        if not self._hole:
+            return
+        if w is None or h is None:
+            w, h = self._client_w, self._client_h
+        if not _set_opaque_hole(ctypes.c_void_p(self.hwnd), w, h):
+            print("[view] 不透明开洞失败（SetWindowRgn）", flush=True)
+
     def _on_resize(self, w, h):
         if w > 0 and h > 0 and (int(self.disp.w), int(self.disp.h)) != (w, h):
             try:
                 self.disp.resize(w, h)
                 self._client_w, self._client_h = w, h
+                self._apply_opaque_hole(w, h)
             except Exception as e:
                 print(f"[view] resize 失败: {e}", flush=True)
 
@@ -324,6 +396,7 @@ class D3DStereoWindow:
                 self.disp.resize(int(mw), int(mh))
             self._mon = (int(mx), int(my), int(mw), int(mh))
             self._client_w, self._client_h = int(mw), int(mh)
+            self._apply_opaque_hole(int(mw), int(mh))
             self._content_key = "unset"    # 内容区域按新屏重新计算并打日志
             self._pending_geom = None
             print(f"[view] 覆盖层已重建 {mw}x{mh} @({mx},{my})", flush=True)
@@ -355,10 +428,12 @@ class D3DStereoWindow:
                          WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                          WS_EX_APPWINDOW | WS_EX_LAYERED)
             return
-        # 默认：LWA_ALPHA=254。alpha=255 会被 DWM 当成不透明平面 → 提升为
-        # 独立翻转/MPO 直扫我们的 flip 缓冲 → 运动时滚动横缝（撕裂）。
-        # 254 强制 DWM 真合成，0.4% 透明肉眼不可见。
-        # _SYNC1 / _COLORKEY 只是 A/B 实验开关（默认关，见 __init__）。
+        # 默认：完全不透明（alpha=255）+ 窗口区域右下角 1 像素洞。alpha=255
+        # 且窗口是完整矩形时，DWM 会把它当不透明平面 → 提升为独立翻转/MPO
+        # 直扫我们的 flip 缓冲 → 运动时滚动横缝（撕裂）；开了洞 DWM 就必须
+        # 逐帧真合成，画面整张在消隐期切换（见 _set_opaque_hole）。
+        # 回退 D2S_ALPHA254=1：整窗 alpha=254，0.4% 透明肉眼不可见。
+        # _SYNC1 / _COLORKEY 只是 A/B 实验开关（默认关，都会撕）。
         if _SYNC1:
             _user32.SetLayeredWindowAttributes(
                 ctypes.c_void_p(self.hwnd), 0, 255, 0x2)       # 不透明
@@ -366,6 +441,12 @@ class D3DStereoWindow:
         if _COLORKEY_ON:
             _user32.SetLayeredWindowAttributes(
                 ctypes.c_void_p(self.hwnd), _COLORKEY, 0, 0x1)  # 颜色键
+            return
+        if self._hole:
+            _user32.SetLayeredWindowAttributes(
+                ctypes.c_void_p(self.hwnd), 0, 255, 0x2)       # 完全不透明
+            if _window_region_missing(ctypes.c_void_p(self.hwnd)):
+                self._apply_opaque_hole()      # 区域不在了（兜底补回）
             return
         _user32.SetLayeredWindowAttributes(
             ctypes.c_void_p(self.hwnd), 0, 254, 0x2)          # LWA_ALPHA=254
