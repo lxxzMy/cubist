@@ -151,6 +151,13 @@ MONITOR_INDEX,  DISPLAY_MODE = settings["Monitor Index"], settings["Display Mode
 # AA=高斯平滑后 / Final=EMA 后（3D 实际用的那张）。默认 Final；面板已不提供
 # 切换（2026-11-24），这里只留 yaml 键给开发用。可实时切换。
 DEPTH_MAP_STAGE = str(settings.get("Depth Map Stage", "Final") or "Final")
+# 深度复用已下线（2026-11-28 用户定案"效果太差"）：设置面板不再有这个开关，
+# 也不读 yaml 的 "Depth Reuse"——旧配置里残留的 true 不得再把它打开。管线里的
+# 代码路径保留（严格配对之外的那条分支），开发对比用环境变量
+# D2S_DEPTH_REUSE=1 临时打开。那条路径上深度比颜色最多晚 DEPTH_MAX_AGE_MS。
+DEPTH_REUSE = (os.environ.get("D2S_DEPTH_REUSE", "").strip().lower()
+               in ("1", "true", "yes", "on"))
+DEPTH_MAX_AGE_MS = float(settings.get("Depth Max Age (ms)", 250) or 250)
 # 采集屏（AB 分离）：独立于输出屏 MONITOR_INDEX。缺省 = 输出屏（老配置无感）。
 # 零拷贝管线要求两者在同一块显卡上——不同卡时 main 启动会弹框提示。
 CAPTURE_MONITOR_INDEX = int(settings.get("Capture Monitor Index",
@@ -189,12 +196,14 @@ FPS = get_fps(WINDOW_TITLE, MONITOR_INDEX)
 # Image Processing Parameters
 FOREGROUND_SCALE = settings["Foreground Scale"] / 10 # 0-10
 # 高斯 AA 的 σ：两个方向里较大的那个，单位 = 深度纹素（另一方向按每眼视口
-# 纵横比缩小，见 main._aa_sigma_texels）。产品值 2（2026-11-24 用户定案；
-# 沿革：旧包实际 3.86 → 改语义后取 1 → 用户对比旧包后觉得 1 太毛糙，定 2）。
+# 纵横比缩小，见 main._aa_sigma_texels）。产品值 3（2026-11-28 用户定案；沿革：
+# 旧包实际 3.86 → 改语义后取 1 → 用户对比旧包后觉得 1 太毛糙，定 2（11-24）
+# → 11-28 用户要求改 3。中途因"掉帧"回退到 2 对照过一次，确认掉帧与 σ 无关
+# ——高斯是固定 19 拍循环，σ 只进权重，计算量不变）。
 # 「画质」卡片已整块隐藏，这是产品定值：**不读 yaml 的 "Anti-aliasing"**——
-# 旧实例/旧配置里残留的 3 会在升级后悄悄沿用。开发/对比实验用环境变量
+# 旧实例/旧配置里残留的值会在升级后悄悄沿用。开发/对比实验用环境变量
 # D2S_AA_KNOB 临时改。
-AA_KNOB = float(os.environ.get("D2S_AA_KNOB", "2") or 2)
+AA_KNOB = float(os.environ.get("D2S_AA_KNOB", "3") or 3)
 AA_STRENGTH = AA_KNOB * 2
 
 # Experimental Settings
@@ -276,9 +285,10 @@ DEPTH_GAMMA = min(3.0, max(0.1, float(settings.get("Depth Gamma", 1.45))))
 # `Depth Smoothing: off` 读出来是 False，str(False).lower()="false" 不在白名单，
 # 于是静默回退成 "fixed"——用户以为关了平滑，实际换了另一种平滑。
 DEPTH_SMOOTHING = "ema"    # 固定纯 EMA（其余算法实测都不如它）
-# Time constant of the fixed smoother。2026-11-22 定案：固定 80ms，面板已移除，
-# 不再从 yaml 读（旧配置里的 Depth Smoothing Tau (ms)/Frames 一律忽略）。
-DEPTH_SMOOTHING_TAU_MS = 80.0
+# Time constant of the fixed smoother。固定值，面板已移除，不再从 yaml 读（旧
+# 配置里的 Depth Smoothing Tau (ms)/Frames 一律忽略）。2026-11-22 定过 80ms，
+# 2026-11-28 用户嫌拖尾长改为 50ms（60Hz 下每帧 α≈0.30，80ms 时约 0.19）。
+DEPTH_SMOOTHING_TAU_MS = 50.0
 DEPTH_SMOOTHING_FRAMES = DEPTH_SMOOTHING_TAU_MS * 60.0 / 1000.0
 # fixed+valve 的快跟随触发阈值：像素差低于它走全平滑，高于它快速切新深度。
 # 0.35=只放行真镜头切换（近似场景跳变实测治理值，2026-11-10）。

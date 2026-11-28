@@ -566,11 +566,12 @@ class D3DRenderer:
         t.state = ST_COMMON
         return t
 
-    def present(self, sync_interval=1, nowait=False):
-        """上屏。nowait=True 走 DXGI_PRESENT_DO_NOT_WAIT：队列满时不阻塞，
-        返回 WAS_STILL_DRAWING 视为"本拍跳过"（返回 False）。"""
+    def present(self, sync_interval=1, nowait=False, checked=False):
+        """上屏。nowait=True 时先用 frame-latency waitable 探一下有没有呈现槽，
+        没有就只提交不上屏（返回 False）。checked=True 表示调用方已经确认过
+        有槽——waitable 是一次性信号，探一次就被消费，不能再探第二次。"""
         d = dll()
-        if nowait:
+        if nowait and not checked:
             # 非阻塞呈现：先用 frame-latency waitable 探一下有没有呈现槽。
             # 没有任何槽 → 本拍只提交不上屏（丢这一帧），绝不阻塞。
             # 注：DXGI_PRESENT_DO_NOT_WAIT(0x400) 在本机的"layered + flip +

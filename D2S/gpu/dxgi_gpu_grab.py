@@ -41,8 +41,14 @@ def qpc_freq():
     _k32_qpc.QueryPerformanceFrequency(ctypes.byref(f))
     return f.value or 1
 _IID_KEYEDMUTEX = "9d8e1289-d7b3-465f-8126-250e349af85d"
-S_KEYED_ACQUIRE = 7
-S_KEYED_RELEASE = 8
+# IDXGIKeyedMutex 的虚表槽位（2026-11-28 解虚表跳板实测，别凭记忆改）：
+# 7=GetSharedHandle（与 IDXGIResource1 第 7 槽是同一个函数）、8=AcquireSync、
+# 9=ReleaseSync。原先写成 7/8，每帧实际调的是 GetSharedHandle(NULL) 和
+# AcquireSync(0, 超时=寄存器残值)——第一次 AcquireSync 成功后锁一直被持有，
+# 之后的拷贝才落地，所以每个槽的第一次拷贝被丢（进 3D 的前 3 帧全黑，
+# poll 却报有新帧）。
+S_KEYED_ACQUIRE = 8
+S_KEYED_RELEASE = 9
 S_CTX4_SIGNAL = 147
 S_CTX4_WAIT = 148
 
@@ -113,12 +119,26 @@ class DxgiGpuColor:
                      "other": 0, "multi": 0}
         self._last_acq_t = 0.0
         self._acq_gap_max = 0.0
+        # 取帧节奏诊断（只记录，不改行为；30s 随 poll30s 打一行）：轮询间隔、
+        # 取帧间隔、"桌面呈现时刻 → 我们取到"的延迟、攥帧时长。
+        self._qpf = qpc_freq()
+        self._prev_poll_end = 0.0
+        self._prev_ok_t = 0.0
+        self._acq_lat_ms = 0.0
+        self._acc_frames = 0
+        self._acq_log = []        # (前一轮询间隔ms, 取帧间隔ms, 取到延迟ms, 累计帧数)
+        self._hold_log = []       # 每次释放时攥了多久（ms）
+        self._pgap_n = [0, 0, 0]  # 轮询间隔 ≥8 / ≥16 / ≥33 ms 的次数
+        self._pgap_max = 0.0
         # DDA 到达率遥测窗：30s 打一行（旧版每 60 次 poll 打一行——3D 空转
         # 时 poll 上千次/秒，11 分钟刷 5000+ 行）
         self._pst_t = time.perf_counter()
         self._pst_n = 0
         # 当前正在显示的槽：采集绝不写它（否则会覆盖正在采样的纹理 → 画面撕裂/闪烁）
         self.avoid = -1
+        # 第二个受保护的槽（流水线：上一对已上屏、还会被重呈现反复采样的
+        # 那一帧；avoid 留给在飞的那一帧）。见 _free_slot。
+        self.avoid2 = -1
         self.writing = [False] * RING      # 采集线程正在写该槽（渲染侧等它写完）
         self.ready = threading.Event()       # 采集线程：资源就绪
         self.registered = threading.Event()  # 渲染线程：GL 注册完成
@@ -134,8 +154,9 @@ class DxgiGpuColor:
         self.ring_gl = None
         # D3D12 桥模式（D2S_RENDER=d3d）：NTHANDLE|KM 环 + producer fence。
         # bridge_fence/bridge_ctx4 由 gpu/dda_bridge.DdaBridge 注入；
-        # bridge_kms = 每 slot 的 IDXGIKeyedMutex（拷贝协议）；bridge_seq
-        # 与消费端 DdaBridge.next_seq 一一对应。
+        # bridge_kms = 每 slot 的 IDXGIKeyedMutex（建环时各取锁一次、一直
+        # 持有，见 _setup_bridge_kms）；bridge_seq 与消费端 DdaBridge.next_seq
+        # 一一对应。
         self.bridge_fence = None
         self.bridge_ctx4 = None
         self.bridge_kms = None
@@ -144,6 +165,9 @@ class DxgiGpuColor:
         # Wait 该槽的最后 signal 值——保证 GPU 已经不再采样它才覆盖。
         self.bridge_fence_cons = None
         self.slot_done = [0] * RING
+        # 每个环槽最后一次被写入时的采集序号（bridge_seq）。消费端显示前
+        # 用它核对"槽里还是不是我的那一帧"。
+        self.slot_seq = [0] * RING
         # DDA 帧所有权：发出 GPU 拷贝后必须等拷贝完成（producer fence
         # 完成值）再 ReleaseFrame——否则 DXGI 可把同一桌面表面交给下一帧，
         # DWM 的写入与我们未完成的拷贝并发 → 拷出"上半旧帧/下半新帧"
@@ -163,6 +187,15 @@ class DxgiGpuColor:
         # acq_qpc = 本次 acquire 返回时刻；两者差 = 采集到达延迟
         self.frame_qpc = 0
         self.acq_qpc = 0
+        # 上一轮 poll 的结果——主循环要区分"会话活着、只是没有新帧"和
+        # "会话坏了"（后者绝不能沿用环里的旧帧）：
+        #   ok     取到新帧并拷进环（返回槽号）
+        #   wait   会话活着但没有新帧（WAIT_TIMEOUT）
+        #   acc0   只有鼠标类更新，桌面图像没变
+        #   na     暂时不可用   error 会话错误（ACCESS_LOST 等）
+        #   nodup  会话不存在   held  上一帧拷贝未落地
+        #   noslot 取到帧但没有空闲环槽（帧被丢弃）
+        self.poll_state = "init"
         # 卡点看门狗：记录当前阶段与进入时刻，独立线程每秒检查一次
         self._phase = "init"
         self._phase_t = time.perf_counter()
@@ -456,8 +489,9 @@ class DxgiGpuColor:
                 print(f"[zcc] 拷贝未落地 ({(_t - self._held_t) * 1000:.1f}ms,"
                       f" 累计 {_n})", flush=True)
             return False
-        self._hold_max = max(getattr(self, "_hold_max", 0.0),
-                             (time.perf_counter() - self._held_t) * 1000.0)
+        _h = (time.perf_counter() - self._held_t) * 1000.0
+        self._hold_log.append(_h)
+        self._hold_max = max(getattr(self, "_hold_max", 0.0), _h)
         self._frame_held = False
         return self._release_frame()
 
@@ -473,11 +507,34 @@ class DxgiGpuColor:
         if _rel:
             print(f"[zcc] ReleaseFrame 失败 hr={_rel & 0xFFFFFFFF:#x}"
                   f" → 重建 duplication", flush=True)
+            self.poll_state = "error"     # 会话已坏：主循环不得沿用旧帧
             self._reopen_dup(tries=1)      # 单次尝试，失败由 poll 顶部节流重试
             return False
         return True
 
     def poll(self):
+        """渲染线程每帧调用：取一帧并拷进空闲环槽，返回槽号（无帧返回 -1）。
+        这一层只做计时（取帧节奏诊断），行为全在 _poll_impl 里。"""
+        _t_in = time.perf_counter()
+        _g = 0.0
+        if self._prev_poll_end:
+            _g = (_t_in - self._prev_poll_end) * 1000.0
+            if _g > self._pgap_max:
+                self._pgap_max = _g
+            for _i, _th in enumerate((8.0, 16.0, 33.0)):
+                if _g >= _th:
+                    self._pgap_n[_i] += 1
+        _ok = self._poll_impl()
+        self._prev_poll_end = time.perf_counter()
+        if _ok >= 0:
+            self._acq_log.append(
+                (_g, (_t_in - self._prev_ok_t) * 1000.0
+                 if self._prev_ok_t else 0.0, self._acq_lat_ms,
+                 self._acc_frames))
+            self._prev_ok_t = _t_in
+        return _ok
+
+    def _poll_impl(self):
         """渲染线程每帧调用：取一帧并拷进空闲环槽，返回槽号（无帧返回 -1）。"""
         self._poll_t = time.perf_counter()
         if self._dup is None:
@@ -493,8 +550,10 @@ class DxgiGpuColor:
                         self._set_phase("idle")
                 except Exception:
                     pass
+            self.poll_state = "nodup"
             return -1
         if self._frame_held and not self._release_held():
+            self.poll_state = "held"
             return -1            # 拷贝仍未落地（异常态）：本轮先不取新帧
         t_pre = time.perf_counter()
         self._set_phase("acquire")
@@ -514,11 +573,14 @@ class DxgiGpuColor:
             if _hr == DXGI_ERROR_WAIT_TIMEOUT:
                 st["wait"] += 1
                 self._err_t0 = 0.0
+                self.poll_state = "wait"
             elif _hr == DXGI_ERROR_NOT_CURRENTLY_AVAILABLE:
                 st["na"] += 1
                 self._err_t0 = 0.0
+                self.poll_state = "na"
             else:
                 st["other"] += 1
+                self.poll_state = "error"
                 if _hr != self._last_err_hr:
                     self._last_err_hr = _hr
                     print(f"[zcc] acquire 错误码 = {_hr:#x} "
@@ -541,6 +603,7 @@ class DxgiGpuColor:
             st["ok"] += 1
             self._err_t0 = 0.0
             self._err_reopen_n = 0
+            self.poll_state = "ok"
             if info.AccumulatedFrames >= 2:
                 st["multi"] += 1          # 一次拿到 2+ 帧 = 消费间隔 > 一个刷新
             _nowa = time.perf_counter()
@@ -556,6 +619,7 @@ class DxgiGpuColor:
             st["acc0"] += 1
             self._err_t0 = 0.0
             self._err_reopen_n = 0
+            self.poll_state = "acc0"
         _nowp = time.perf_counter()
         if _nowp - self._pst_t >= 30.0:
             # DDA 到达率常驻暴露（30s 窗）。accsum=窗口内 AccumulatedFrames
@@ -571,6 +635,7 @@ class DxgiGpuColor:
                   f"holdmax={getattr(self, '_hold_max', 0.0):.1f}ms "
                   f"holdblk={getattr(self, '_hold_blk', 0)} "
                   f"hr={self._last_err_hr:#x})", flush=True)
+            print("[zcc] " + self._acq_stats(), flush=True)
             self._acq_gap_max = 0.0
             self._hold_max = 0.0
             self._hold_blk = 0
@@ -592,19 +657,14 @@ class DxgiGpuColor:
             if info.AccumulatedFrames:
                 src = ComPtr(ComPtr(res_pp.value).qi(_IID_TEX2D))
                 try:
-                    for _ in range(RING):
-                        cand = self._ring_i
-                        self._ring_i = (self._ring_i + 1) % RING
-                        # 与后台 _loop 同规则：绝不覆盖当前正在显示的槽
-                        # （D3D 重呈现会反复采样它；覆盖=一帧撕裂/闪烁）
-                        if not self.gl_locked[cand] and cand != self.avoid:
-                            idx = cand
-                            break
+                    idx = self._free_slot()
                     if idx >= 0:
                         self.writing[idx] = True
                         try:
                             self._set_phase("copy")
-                            km = self.bridge_kms[idx] if self.bridge_kms else None
+                            # 桥模式（环带 NTHANDLE|KM）：拷贝后要发信号。
+                            # 锁在建环时已对每个槽取过并一直持有，这里不碰
+                            bridge_on = bool(self.bridge_kms)
                             # 槽回收：等 GPU 用完这个槽的上一次显示/重呈现
                             # （D3D12 消费者 signal 的共享 fence）再覆盖
                             if (self.bridge_fence_cons is not None
@@ -614,14 +674,9 @@ class DxgiGpuColor:
                                     (ctypes.c_void_p, ctypes.c_uint64),
                                     self.bridge_fence_cons.p,
                                     self.slot_done[idx])
-                            if km:
-                                km.call(S_KEYED_ACQUIRE, ctypes.c_long,
-                                        (ctypes.c_uint64, ctypes.c_uint), 0, 0)
                             ctx_copy_resource(self._ctx, self._ring[idx], src)
-                            if km:
+                            if bridge_on:
                                 self.bridge_signal_after_copy(idx)
-                                km.call(S_KEYED_RELEASE, ctypes.c_long,
-                                        (ctypes.c_uint64,), 0)
                                 # 先攥着这一帧：帧末 _release_held() 在拷贝
                                 # 早已落地后 ReleaseFrame（DDA 契约），既不
                                 # 花 CPU 等待，也不跳过任何一轮 acquire。
@@ -665,7 +720,76 @@ class DxgiGpuColor:
                 self.frame_qpc = 0
             self._last_pub = (self.gen, idx, t_pre, time.perf_counter(),
                               (self._w, self._h), None, self.tag)
+            self.slot_seq[idx] = self.bridge_seq
+            # 取帧节奏诊断：桌面这帧的呈现时刻（DDA 给的 QPC）→ 我们取到的延迟
+            try:
+                self._acq_lat_ms = ((qpc() - int(info.LastPresentTime))
+                                    * 1000.0 / self._qpf
+                                    if info.LastPresentTime else 0.0)
+            except Exception:
+                self._acq_lat_ms = 0.0
+            self._acc_frames = int(info.AccumulatedFrames)
+        elif self.poll_state == "ok":
+            self.poll_state = "noslot"
         return idx
+
+    def _free_slot(self):
+        """挑一个可以被新帧覆盖的环槽；没有返回 -1。
+
+        绝不覆盖两个槽：正在推理/刚提交的那一帧（avoid），和上一对已经
+        上屏、还会被重呈现反复采样的那一帧（avoid2）。环是 3 槽，所以
+        永远给采集留着一个槽放最新帧。少了任何一个保护，GPU 被拖慢时
+        采集就会把"更新的画面"写进正在被显示的槽：画面先闪到未来、再随
+        下一对跳回去（用户看到的"疯狂回退"，2026-11-27 全屏游戏实测）。
+        """
+        for _ in range(RING):
+            cand = self._ring_i
+            self._ring_i = (self._ring_i + 1) % RING
+            if (not self.gl_locked[cand] and cand != self.avoid
+                    and cand != self.avoid2):
+                return cand
+        return -1
+
+    def frame_unchanged(self):
+        """上一轮 poll 没给帧，而且原因是"会话活着、只是没有新帧"
+        （wait / acc0）——只有这时环里的上一帧才仍然是当前桌面，可以沿用。
+        会话错误、重建中、拷贝未落地都不算：那一帧可能早已过时。"""
+        return self.poll_state in ("wait", "acc0")
+
+    @property
+    def copy_pending(self):
+        """刚采到的那一帧还在往环槽里拷（GPU 上没落地）。"""
+        return self._frame_held
+
+    def _acq_stats(self):
+        """取帧节奏一行（本窗），打完清零。用来分清"取帧率低"是主循环没来取、
+        还是来了但 DDA 迟迟不给、还是取到了在等拷贝落地。"""
+        import numpy as _np
+        log, hold = self._acq_log, self._hold_log
+        pg, pgm = self._pgap_n, self._pgap_max
+        self._acq_log, self._hold_log = [], []
+        self._pgap_n, self._pgap_max = [0, 0, 0], 0.0
+        if not log:
+            return "取帧节奏: 本窗没取到帧"
+        a = _np.array(log, _np.float64)
+        h = _np.array(hold, _np.float64) if hold else _np.zeros(1)
+
+        def p(x, q):
+            return float(_np.percentile(x, q)) if x.size else float("nan")
+
+        one = a[a[:, 3] == 1]
+        many = a[a[:, 3] >= 2]
+        return ("取帧节奏: 轮询间隔 max=%.1fms（≥8ms %d 次, ≥16ms %d, ≥33ms %d）| "
+                "取帧间隔 p50=%.1f p90=%.1f max=%.1f ms | "
+                "桌面呈现→取到 p50=%.1f p90=%.1f max=%.1f ms | "
+                "单帧 n=%d 取到延迟 p50=%.1f | 合并帧 n=%d 取到延迟 p50=%.1f "
+                "其前一轮询间隔 p50=%.1f | 攥帧 p50=%.1f max=%.1f ms（%d 次）"
+                % (pgm, pg[0], pg[1], pg[2],
+                   p(a[:, 1], 50), p(a[:, 1], 90), float(a[:, 1].max()),
+                   p(a[:, 2], 50), p(a[:, 2], 90), float(a[:, 2].max()),
+                   int(one.shape[0]), p(one[:, 2], 50),
+                   int(many.shape[0]), p(many[:, 2], 50), p(many[:, 0], 50),
+                   p(h, 50), float(h.max()), int(h.size)))
 
     def _open_dup(self):
         # 重试期内（模式切换中）每 250ms 会调一次：失败细节每秒最多打一行
@@ -794,17 +918,51 @@ class DxgiGpuColor:
 
         fence_cons：反向（消费者→生产者）fence。采集写槽前 Wait 该槽最后
         的消费者 signal 值，避免覆盖还在被 GPU 采样的环纹理（一帧闪/撕裂）。
+
+        ctx4 必须是【本采集设备 immediate context】的 ID3D11DeviceContext4
+        （桥要用 dev11=self._dev, ctx11=self._ctx 建）：拷贝后的 Signal 和写槽前
+        的 Wait 都发在它上面，而环纹理的拷贝在 self._ctx 上执行。不是同一个
+        上下文（= 另一个设备）时两者之间没有先后保证——渲染队列等到信号时
+        拷贝可能还没执行，显示读到环槽里上一轮的画面（帧号在涨、画面往回跳，
+        2026-11-28）。这里直接报错，不让错误的接线带着竞态跑起来。
         """
+        if ctx4 is not None and getattr(self, "_ctx", None) is not None:
+            from .dda_bridge import CTX4_IID
+            own = ctypes.c_void_p(self._ctx.qi(CTX4_IID))
+            try:
+                same = bool(ctx4.p and ctx4.p.value == own.value)
+            finally:
+                if own.value:
+                    ComPtr(own.value).release()
+            if not same:
+                raise RuntimeError(
+                    "[bridge] ctx4 不是采集设备的上下文：桥必须用 "
+                    "DdaBridge(ren, dev11=<采集设备>, ctx11=<采集上下文>) 建，"
+                    "否则'拷贝完成'信号与拷贝不在同一设备、没有先后保证")
         self.bridge_fence = fence11
         self.bridge_ctx4 = ctx4
         self.bridge_fence_cons = fence_cons
 
     def _setup_bridge_kms(self):
-        """环纹理的每-slot IDXGIKeyedMutex（NTHANDLE|KM 模式下的拷贝协议）。"""
+        """环纹理的每-slot IDXGIKeyedMutex（NTHANDLE|KM 模式）：各取锁一次，
+        一直持有到环销毁。
+
+        带锁共享的纹理没取锁就写，那次拷贝被静默丢掉（实测每个槽的第一次
+        全丢：进 3D 前 3 帧全黑）。生产里其实一直是"已持有"的状态——只是靠
+        每帧拷贝后那次（写错了槽位的）AcquireSync 在第一次使用时取上。这里
+        改成建环时显式取锁，每帧不再碰它。先后保证来自桥的 fence（拷贝后
+        Signal / 写槽前 Wait）；D3D12 那头从不碰这个锁。
+        """
         self.bridge_kms = []
-        for t in self._ring:
-            km = ctypes.c_void_p(t.qi(_IID_KEYEDMUTEX))
-            self.bridge_kms.append(ComPtr(km.value))
+        for i, t in enumerate(self._ring):
+            km = ComPtr(ctypes.c_void_p(t.qi(_IID_KEYEDMUTEX)).value)
+            # 超时 100ms：正常立刻返回（新建的锁没人持有）；真等不到就留日志
+            hr = km.call(S_KEYED_ACQUIRE, ctypes.c_long,
+                         (ctypes.c_uint64, ctypes.c_uint), 0, 100)
+            if hr:
+                print(f"[zcc] 槽{i} 取锁失败 hr={hr & 0xFFFFFFFF:#x}"
+                      f"（该槽的拷贝会被丢）", flush=True)
+            self.bridge_kms.append(km)
         print(f"[zcc] 桥模式：环 NTHANDLE|KM（{RING} 槽）", flush=True)
 
     def bridge_signal_after_copy(self, idx):
@@ -960,25 +1118,16 @@ class DxgiGpuColor:
                                      ctypes.byref(_d))
                             print(f"[zcc] 帧纹理格式 = {_d.Format}"
                                   f"（87=BGRA8, 10=FP16）", flush=True)
-                        for _ in range(RING):
-                            cand = self._ring_i
-                            self._ring_i = (self._ring_i + 1) % RING
-                            if not self.gl_locked[cand] and cand != self.avoid:
-                                idx = cand
-                                break
+                        idx = self._free_slot()
                         if idx >= 0:
                             self.writing[idx] = True
                             try:
                                 self._set_phase("copy")
-                                km = self.bridge_kms[idx] if self.bridge_kms else None
-                                if km:
-                                    km.call(S_KEYED_ACQUIRE, ctypes.c_long,
-                                            (ctypes.c_uint64, ctypes.c_uint), 0, 0)
+                                # 锁在建环时已取过并一直持有（_setup_bridge_kms）
                                 ctx_copy_resource(self._ctx, self._ring[idx], src)
-                                if km:
+                                if self.bridge_kms:
                                     self.bridge_signal_after_copy(idx)
-                                    km.call(S_KEYED_RELEASE, ctypes.c_long,
-                                            (ctypes.c_uint64,), 0)
+                                    self.slot_seq[idx] = self.bridge_seq
                                 self._set_phase("idle")
                             finally:
                                 self.writing[idx] = False

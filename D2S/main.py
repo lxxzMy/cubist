@@ -163,6 +163,10 @@ REFRESH_HZ = max(1.0, float(FPS))
 # 为了每次 vblank 前都有一帧待翻，避免调度抖动错过 vblank 掉成半速。
 # 它只决定光标/overlay 的重画频率，不限制内容处理。
 REPRESENT_DT = 0.968 / REFRESH_HZ
+# 深度复用模式下重呈现的静止判据：这么久没采到新帧才算"画面静止"、才按刷新率
+# 重呈现上一对（光标/FPS 角标跟随）。画面在动的时候不重呈现——见
+# _tick_pipeline 第 2 步。
+REP_IDLE_DT = 0.25
 
 # Queues with size=1 (latest-frame-only logic)
 class LatestSlot:
@@ -1147,6 +1151,27 @@ def _aa_sigma_texels(res_w, res_h, vp, base):
     return base * (r_ar / v_ar), base
 
 
+def _infer_submit(pl, zc, outs, frame, shim):
+    """流水线第 3 步：把一帧交给推理（渲染卡上的 shim）并记账。不等待。
+    frame = (槽, 采集序号, 桌面呈现时刻)。"""
+    pidx, pseq, pqpc = frame
+    o = outs[pl["out_i"]]
+    pl["out_i"] ^= 1
+    pl["seq"] += 1
+    tag = pl["seq"]
+    shim.submit(tag, o.ctypes.data, o.nbytes)
+    pl["tag"] = (tag, o, pidx)
+    pl.setdefault("cseq", {})[tag] = pseq
+    zc.avoid = pidx                # 在飞的那一帧：槽不许被采集覆盖
+    pl["caps"] = pl.get("caps", 0) + 1
+    try:
+        pl.setdefault("pair_qpc", {})[tag] = pqpc
+        if len(pl["pair_qpc"]) > 64:
+            pl["pair_qpc"].clear()
+    except Exception:
+        pass
+
+
 def _main_d3d(mode="Viewer"):
     """D3D12 产品主循环（Cubist-1.1-d3d 主路径；GL 回退 D2S_RENDER=gl）。
 
@@ -1240,6 +1265,14 @@ def _main_d3d(mode="Viewer"):
     # 呈现探针（logs/present_watch.on）：每次上屏打 seq/slot/bb/是否真上屏，
     # 用来判定"画面回退"是槽复用（seq 正常、内容旧）还是 flip 队列（bb 换）。
     _PRESENT_PROBE = os.path.join(_LOGDIR, "present_watch.on")
+    # 诊断开关（logs/auto_conv_freeze.on）：冻结收敛面——锚照常读、照常打日志，
+    # 但不再应用到显示参数。用来当场判断"画面抖"是不是收敛面逐帧摆动造成的。
+    _ACF_FLAG = os.path.join(_LOGDIR, "auto_conv_freeze.on")
+    # 诊断开关（logs/out_probe.on）：每次上屏后把同一对重画到离屏并读回，记一条
+    # 横带的列投影到 out_probe.bin——量"GPU 上实际画出来的帧序"。会强制 GPU
+    # 同步，开着时节拍会变慢（这本身也是个对照）。
+    _OUTP_FLAG = os.path.join(_LOGDIR, "out_probe.on")
+    _OUTP_BIN = os.path.join(_LOGDIR, "out_probe.bin")
     _params_mtime = 0.0
     _params_t = 0.0
 
@@ -1268,11 +1301,24 @@ def _main_d3d(mode="Viewer"):
                 _Q(), int(getattr(window, "output_index", 0)),
                 adapter=getattr(window, "adapter", None))
             _zcc.build_inline(gl_ctx=None)
-            _bridge = DdaBridge(ren, adv=getattr(window, "adapter", None))
+            # 桥必须建在【采集设备】上：环纹理的拷贝是在 _zcc._ctx（采集设备
+            # 的 immediate context）里执行的，"拷贝完成"的 Signal 和"写槽前等
+            # 消费端读完"的 Wait 必须发在同一个设备的上下文上才有先后保证。
+            # 让桥自建设备时，Signal 排在另一个设备的队列里、与拷贝无关——
+            # 渲染队列等到信号时拷贝可能还没执行，显示就读到环槽里上一轮的
+            # 画面（帧号在涨、画面往回跳；2026-11-28 实测）。门禁
+            # tools/dda_bridge_smoke.py 的 B0/B6 守这一条。
+            _bridge = DdaBridge(ren, dev11=_zcc._dev, ctx11=_zcc._ctx,
+                                adv=getattr(window, "adapter", None))
             _f11, _ctx4 = _bridge.producer_handles()
             _fcons11, _ = _bridge.consumer_handles()
             _zcc.attach_bridge_fence(_f11, _ctx4, _fcons11)
             ring = _bridge.open_ring(_zcc._ring, _zcc._w, _zcc._h)
+            # 显示用的颜色拷贝：新一对上屏前把它的环槽拷进来，之后的重呈现
+            # 读这一份。环槽只被那一次拷贝读——重呈现不再压着环槽、也不再往
+            # 渲染队列尾部追加这个槽的消费信号（见 _tick_pipeline 第 2 步）
+            disp = ren.create_tex(_zcc._w, _zcc._h, _dr.FMT_BGRA8,
+                                  renderable=False)
             # 直方图量程每帧按 raw 的 min/max 自动取（D3DStats 内），
             # 模型输出什么尺度都不用配
             stats = D3DStats(ren, (window._res_w, window._res_h))
@@ -1283,7 +1329,7 @@ def _main_d3d(mode="Viewer"):
             out2 = np.empty(_npx, np.float32)
             _cap = dict(zcc=_zcc, bridge=_bridge, ring=ring, stats=stats,
                         shim=shim, out=out, outs=[out, out2],
-                        fcons12=_bridge.consumer_fence12())
+                        fcons12=_bridge.consumer_fence12(), disp=disp)
             _retry_n = 0
             _retry_at = 0.0
             print(f"[capture] D3D 采集环就绪 {_zcc._w}x{_zcc._h} "
@@ -1360,6 +1406,13 @@ def _main_d3d(mode="Viewer"):
                 cap0["bridge"].close()
             except Exception:
                 pass
+            _disp0 = cap0.get("disp")
+            if _disp0 is not None:
+                try:
+                    _disp0.release()
+                except Exception:
+                    pass
+            _pl["pend"] = None       # 待提交的那一帧在旧环里，随环一起作废
         try:
             import gc as _gc
             _gc.collect()
@@ -1373,6 +1426,7 @@ def _main_d3d(mode="Viewer"):
     # p99 只统计最近 5 秒 —— 偶发卡顿在打印前的滚动窗口里已经被挤掉了。
     _proc = _dq(maxlen=2048)
     _lat_e2e = _dq(maxlen=2048)   # 桌面 present → 本帧 present 提交（ms）
+    _lat_dage = _dq(maxlen=2048)  # 深度复用：屏幕上深度比颜色晚多少（ms）
     _lat_cap = _dq(maxlen=2048)   # 桌面 present → DDA acquire 返回（ms）
     _st_inf = _dq(maxlen=2048)    # 推理（prep pass + DML run）
     _st_run = _dq(maxlen=2048)    # DML Run 本体（shim 自报，ms）
@@ -1389,16 +1443,21 @@ def _main_d3d(mode="Viewer"):
     _fops = {}      # 本帧窗口（非每帧操作 → 本次耗时），卡顿时随帧打印
 
     def _wm(name, t0):
-        """记一笔非每帧开销（max/sum/n，30s 清零）；返回本次耗时 ms。"""
+        """记一笔非每帧开销（max/sum/n，30s 清零；≥8ms 的另计次数与总时长）；
+        返回本次耗时 ms。"""
         d = (time.perf_counter() - t0) * 1000.0
         b = _win.get(name)
+        _slow = d >= 8.0
         if b is None:
-            _win[name] = [d, d, 1]
+            _win[name] = [d, d, 1, 1 if _slow else 0, d if _slow else 0.0]
         else:
             if d > b[0]:
                 b[0] = d
             b[1] += d
             b[2] += 1
+            if _slow:
+                b[3] += 1
+                b[4] += d
         _fops[name] = d
         return d
 
@@ -1412,6 +1471,9 @@ def _main_d3d(mode="Viewer"):
     _vis = None
     _prev_idx = -1
     _switch_force = False
+    _overlay_pending = False   # 已要 3D、但本段第一帧还没上屏（覆盖层先不显示）
+    _overlay_t0 = 0.0
+    _present_seq0 = 0          # 进入 3D 时的 present 计数（变了 = 本段已上过屏）
     _style_t = 0.0
     # ---- 内容区域（GL 同语义）：只对前台窗口做视差，桌面/任务栏原样 ----
     _u32c = _ctd.windll.user32
@@ -1819,7 +1881,11 @@ def _main_d3d(mode="Viewer"):
                 if not globals().get("_tear_err_logged"):
                     globals()["_tear_err_logged"] = True
                     print(f"[tear] 探针异常: {_te!r}", flush=True)
-        # 5) 显示 + present（同帧一条龙）
+        # 5) 显示 + present（同帧一条龙）。往后台缓冲里画之前先等翻转槽
+        #    （原因见 _flip_slot_free）；串行路径可以等，最多 50ms。
+        for _ in range(10):
+            if ren.wait_flip(5):
+                break
         window.attach_color(src, *cap["zcc"].size)
         window.render(stats=cap["stats"])
         window.present()
@@ -1876,11 +1942,58 @@ def _main_d3d(mode="Viewer"):
               and not os.environ.get("D2S_D3D_DUMP")
               and not os.environ.get("D2S_FRAME_DUMP"))
     _pl = {"tag": None, "pair": None, "last_pair": None, "out_i": 0,
-           "rb_v": None, "seq": 0, "n": 0, "n0": 0, "n1": 0}
+           "rb_v": None, "seq": 0, "n": 0, "n0": 0, "n1": 0,
+           # 待送去推理的最新一帧 (槽, 采集序号, 桌面呈现时刻)：采到帧的同一拍
+           # 不交推理，等它的采集拷贝落地（见 _tick_pipeline 第 3 步）
+           "pend": None}
     _pl_gpu = None      # None=未判定；True=推理输出留在显存；False=CPU 输出
     # 深度链的 defer 语义只由本循环开启（离屏工具/parity 保持旧的 wait 语义）
     window.post.defer = _PL_ON
     _pl_ticked = [False]      # 本拍是否已由 idle 分支推进（防重复 tick）
+    # ---- 垂直同步时钟：输出屏最近一次垂直同步的 QPC 时刻 ------------------
+    # 用途见第 2 步"等到槽也不能马上画"。守在交换链所在的那块输出屏上
+    # （IDXGIOutput::WaitForVBlank），每次垂直同步醒来记一次时刻；阻塞在
+    # 系统调用里，不占 CPU。ctypes 对象全部提在外面（热点里建 ctypes 类型
+    # 会成环、触发 gen2 GC 停顿）。
+    _VBQ = [0]
+    _SLOT_VBLANK = os.environ.get("D2S_SLOT_VBLANK", "1") != "0"
+
+    def _vblank_loop():
+        _d = _dr.dll()
+        _LONG, _U32, _U64 = _ct_mod.c_long, _ct_mod.c_uint32, _ct_mod.c_uint64
+        _AT = (_ct_mod.c_void_p, _ct_mod.POINTER(_ct_mod.c_void_p))
+        _out = None
+        while True:
+            try:
+                if _out is None:
+                    _d.d3dr_get_sc_ptr.restype = _U64
+                    _scp = int(_d.d3dr_get_sc_ptr(ren.ctx) or 0)
+                    if not _scp:
+                        time.sleep(0.05)
+                        continue
+                    _o = _ct_mod.c_void_p()
+                    # IDXGISwapChain::GetContainingOutput = 槽 15
+                    _hr = _zcc_mod.ComPtr(_scp).call(15, _LONG, _AT,
+                                                     _ct_mod.byref(_o))
+                    if _hr or not _o.value:
+                        time.sleep(0.05)
+                        continue
+                    _out = _zcc_mod.ComPtr(_o.value)
+                # IDXGIOutput::WaitForVBlank = 槽 10：阻塞到下一次垂直同步
+                _hr = _out.call(10, _LONG, ())
+                if _hr:
+                    _out.call(2, _U32, ())       # 交换链重建/输出变了：重取
+                    _out = None
+                    time.sleep(0.02)
+                    continue
+                _VBQ[0] = _zcc_mod.qpc()
+            except Exception:
+                _out = None
+                time.sleep(0.05)
+
+    if _SLOT_VBLANK:
+        threading.Thread(target=_vblank_loop, name="d2s-vblank",
+                         daemon=True).start()
 
     def _pl_aa():
         """当前每眼视口的 (横向 σ, 纵向 σ)（纹素；与 _process 同口径，
@@ -1898,6 +2011,72 @@ def _main_d3d(mode="Viewer"):
                                     _vp, base)
         except Exception:
             return base, base
+
+    def _pair_slot_ok(cap, pair):
+        """这一对的颜色槽里还是不是它自己的那一帧（pair = (槽, 深度, 序号,
+        采集序号)）。不是 → 计一次 slotmis 并返回 False，调用方丢掉这一拍。"""
+        try:
+            _seqs = cap["zcc"].slot_seq
+            _i, _c = pair[0], pair[3]
+        except Exception:
+            return True
+        if _c is None or _seqs[_i] == _c:
+            return True
+        _pl["slotmis"] = _pl.get("slotmis", 0) + 1
+        return False
+
+    def _flip_slot_free(t0):
+        """翻转队列有没有空槽（非阻塞）。必须在往后台缓冲里画【之前】问。
+
+        返回 1=有槽（waitable 已被这次询问消费，提交时不能再问）、
+        0=没有、2=连续 100ms 拿不到槽，强制放行（提交时仍按老办法再探一次）。
+
+        交换链 3 张缓冲、最多 2 帧排队。队列满的时候，GetCurrentBackBufferIndex
+        给的是刚被换下、DWM 还在屏幕上显示的那一张——往里画等于把"未来"的
+        帧提前显示，等排队的旧帧上屏时画面再跳回去。GPU 被别的程序拖慢时
+        排队的帧迟迟出不来，每一拍都会撞上：用户看到的就是逐帧"回退"。
+        （旧代码是先画、再问、没槽就跳过提交——画已经画下去了。2026-11-27
+        全屏游戏实测定位。）
+        waitable 对象在个别配置下永远不触发：连续 100ms 拿不到槽就放行一次。
+        """
+        if ren.wait_flip(0):
+            _pl["noslot_t"] = 0.0
+            return 1
+        t = _pl.get("noslot_t", 0.0)
+        if not t:
+            _pl["noslot_t"] = t0
+            return 0
+        if t0 - t > 0.1:
+            _pl["noslot_t"] = t0
+            return 2
+        return 0
+
+    def _out_probe(cap, kind, seq, color_tex, depth_tex):
+        """诊断（logs/out_probe.on）：把本拍刚提交上屏的同一对重画到离屏并读回
+        （与撕裂探针同款），记 (kind, seq, t, 列投影) 到 out_probe.bin。
+        kind 0=首次显示 1=重呈现。强制 GPU 同步。"""
+        try:
+            ot = _pl.get("_ot")
+            if ot is None:
+                ot = ren.create_tex(window.disp.w, window.disp.h,
+                                    _dr.FMT_BGRA8, renderable=True)
+                _pl["_ot"] = ot
+            window.disp.draw(window._mode, color_tex, depth_tex,
+                             src_w=cap["zcc"].size[0],
+                             src_h=cap["zcc"].size[1], out=ot)
+            arr = ren.readback(ot, np.uint8)
+            prof = arr[512:576:4, 2::4, 1].astype(np.float32).mean(axis=0)
+            f = _pl.get("_outf")
+            if f is None:
+                f = open(_OUTP_BIN, "ab")
+                _pl["_outf"] = f
+            f.write(np.array([kind, int(seq)], np.int32).tobytes())
+            f.write(np.array([time.perf_counter()], np.float64).tobytes())
+            f.write(prof.tobytes())
+        except Exception as e:
+            if not _pl.get("_outp_err"):
+                _pl["_outp_err"] = True
+                print(f"[out-probe] 失败: {e!r}", flush=True)
 
     def _tick_pipeline(idx):
         """流水线一拍（idx=-1 表示这一拍没有新采集帧）。
@@ -1934,14 +2113,44 @@ def _main_d3d(mode="Viewer"):
                       f"，buf=0，gpuErr={_err!r}）", flush=True)
         t0 = time.perf_counter()
         _did_work = False
+        _pl["hold"] = False       # 这一拍没翻转槽：不碰后台缓冲、不提交新帧
+        _pl["chained"] = False    # 本拍跑了深度链（深度复用时据此跳过显示帧的平滑步）
+        # 深度复用（utils.DEPTH_REUSE，默认关；面板已无开关，开发用环境变量
+        # D2S_DEPTH_REUSE=1；见第 2 步说明）
+        _reuse = (bool(getattr(_utils_mod, "DEPTH_REUSE", False))
+                  and not _pl_gpu)
+        # GPU 积压（非阻塞读栅栏）：我们提交了、GPU 还没执行完的次数
+        try:
+            _lag = int(ren.last_fence() - ren.completed_fence())
+            if _lag > 0:
+                if _lag > _pl.get("lag_max", 0):
+                    _pl["lag_max"] = _lag
+                _pl["lag_sum"] = _pl.get("lag_sum", 0) + _lag
+                _pl["lag_n"] = _pl.get("lag_n", 0) + 1
+        except Exception:
+            pass
         _st = cap["stats"]
         # 呈现探针开关（1s 节流读文件；logs/present_watch.on）
         if t0 - _pl.get("probe_t", 0.0) >= 1.0:
             _pl["probe_t"] = t0
             try:
                 _pl["probe"] = os.path.exists(_PRESENT_PROBE)
+                _pl["acf"] = os.path.exists(_ACF_FLAG)
+                _outp = os.path.exists(_OUTP_FLAG)
+                if _outp and not _pl.get("outp"):
+                    try:
+                        os.remove(_OUTP_BIN)      # 每次打开都从头记
+                    except OSError:
+                        pass
+                    _pl["_outf"] = None
+                elif not _outp and _pl.get("_outf") is not None:
+                    _pl["_outf"].close()
+                    _pl["_outf"] = None
+                _pl["outp"] = _outp
             except Exception:
                 _pl["probe"] = False
+                _pl["acf"] = False
+                _pl["outp"] = False
         # 0) 收敛锚：读上一拍提交的读回（非阻塞；没完成就沿用旧值）
         if _pl["rb_v"] is not None:
             _vals = _st.readback_poll(_pl["rb_v"])
@@ -1959,8 +2168,17 @@ def _main_d3d(mode="Viewer"):
                     auto_convergence_update(None)
                     _cv = min(1.0, max(0.0, _AUTO_CONV[0] - AUTO_CONV_OFFSET
                                     - _auto_conv_bias()))
+                    if _pl.get("acf"):
+                        _cv = float(globals().get("_APPLIED_CONV", _cv))
                     window.apply_live_params({"Convergence": _cv})
                     globals()["_APPLIED_CONV"] = float(_cv)
+                    if _pl.get("probe"):
+                        # 逐帧锚/收敛面（分析"3D 画面逐帧摆动"用）
+                        print(f"[cv] anchor={_ad:.4f} cv={_cv:.4f} "
+                              f"p50={float(_vals[4]):.4f} "
+                              f"lo={float(_vals[0]):.3f} hi={float(_vals[1]):.3f}"
+                              f"{' FROZEN' if _pl.get('acf') else ''}",
+                              flush=True)
                 except Exception:
                     pass
         # 1) 推理完成 → 链（不等待）【CPU 输出模式】
@@ -1969,6 +2187,7 @@ def _main_d3d(mode="Viewer"):
             _tag, _raw, _pidx = _pl["tag"]
             _pl["tag"] = None
             _seq = _tag
+            _cseq = _pl.get("cseq", {}).pop(_seq, None)
             _src = cap["ring"][_pidx]
             window.post.upload_raw(
                 _raw.reshape(window._res_h, window._res_w))
@@ -1987,7 +2206,17 @@ def _main_d3d(mode="Viewer"):
             # 链已提交（同队列）→ 紧接着提交 stats 读回，不等待
             if _pl["rb_v"] is None:
                 _pl["rb_v"] = _st.readback_start()
-            _pl["pair"] = (_pidx, window.post.last_disp_depth, _seq)
+            _pl["chained"] = True
+            if _reuse:
+                # 深度复用：这一帧算完的深度成为"最新完成的深度"，不生成待显示
+                # 的一对——显示那一步用"最新采集帧 + 这张深度"现配
+                _pl["last_depth"] = (window.post.last_disp_depth,
+                                     _pl.get("pair_qpc", {}).get(_seq) or 0,
+                                     _seq)
+            else:
+                # 严格配对：(颜色槽, 深度纹理, 显示序号, 颜色采集号, 深度来源序号, 深度年龄ms)
+                _pl["pair"] = (_pidx, window.post.last_disp_depth, _seq,
+                               _cseq, _seq, 0.0)
             _pl["chains"] = _pl.get("chains", 0) + 1
         # 1b) GPU 输出模式：新帧 → prep 提交 → 推理入队 → 深度链入队。
         #     同一拍里全部入队（同队列 FIFO：推理→链），CPU 不等待，
@@ -2026,7 +2255,8 @@ def _main_d3d(mode="Viewer"):
                 if _pl["rb_v"] is None:
                     _pl["rb_v"] = _st.readback_start()
                 _pl["seq"] += 1
-                _pl["pair"] = (idx, window.post.last_disp_depth, _pl["seq"])
+                _pl["pair"] = (idx, window.post.last_disp_depth, _pl["seq"],
+                               cap["zcc"].slot_seq[idx], _pl["seq"], 0.0)
                 cap["zcc"].avoid = idx
                 _pl["chains"] = _pl.get("chains", 0) + 1
                 _pl["caps"] = _pl.get("caps", 0) + 1
@@ -2036,28 +2266,128 @@ def _main_d3d(mode="Viewer"):
                 except Exception:
                     pass
                 _did_work = True
-        # 2) 显示这一对（颜色槽 + 同帧 disp_depth）。准备就绪就立刻上屏：
-        #    能不能被 DWM 消费交给 flip 队列/waitable 判定，不在这里节流。
-        if _pl["pair"] is not None:
-            _didx, _ddepth, _dseq = _pl["pair"]
-            _pl["last_pair"] = _pl["pair"]
+        # 2) 显示这一对（颜色槽 + 同帧 disp_depth）。
+        # 先问翻转队列有没有槽（_flip_slot_free）：没有就不碰后台缓冲，这一对
+        # 留到下一拍——它的槽此时还靠 avoid 保护，所以这一拍也不提交新帧。
+        # waitable 是一次性信号：只在真的要往后台缓冲里画的那一拍才问；问了
+        # 就必须提交，否则信号白白丢掉（没有状态变化就永远拿不到槽）。
+        # 颜色槽里必须还是这一对的那一帧：采集若已把更新的画面写进同一个
+        # 槽，显示出来就是"未来"的一帧、下一对再跳回去（用户看到的"回退"）。
+        # avoid / avoid2 保证不会发生；万一发生，宁可丢掉这一拍也不显示错帧。
+        #
+        # 深度复用（utils.DEPTH_REUSE，默认关）：颜色不再等自己的深度。
+        # 推理单元一空就拿最新一帧去算（间隔随推理快慢自动变），显示时用
+        # "最新采集帧 + 最新算完的那张（时域平滑后的）深度"现配一对。深度比
+        # 颜色最多晚 DEPTH_MAX_AGE_MS：更旧的就不配这一帧（宁可不显示）。
+        if (_reuse and _pl["pair"] is None and idx >= 0
+                and _pl["last_depth"] is not None):
+            _ld_tex, _ld_qpc, _ld_seq = _pl["last_depth"]
+            _age = ((_zcc_mod.qpc() - _ld_qpc) * 1000.0 / _qpf) \
+                if _ld_qpc else 0.0
+            if _age <= float(getattr(_utils_mod, "DEPTH_MAX_AGE_MS", 250.0)):
+                # 这一对的颜色是这一拍刚采到的：第 3 步的桥 gate（在渲染队列上
+                # 等 D3D11 拷贝落地）此时还没排上。显示 pass 若抢在拷贝前执行，
+                # 读到的是这个环槽里的旧内容（上一轮的帧）——画面先往回跳、
+                # 下一对再跳回来。串行 / 严格配对 / GPU 输出都是先排 gate 再
+                # 采样，只有这里漏了（2026-11-27 游戏实测，GPU 被占时拷贝迟到）。
+                # 所以配对时就在渲染队列上等这次拷贝。
+                cap["bridge"].queue_wait(cap["zcc"].slot_seq[idx])
+                _pl["pair"] = (idx, _ld_tex, _pl["seq"] + 1,
+                               cap["zcc"].slot_seq[idx], _ld_seq, _age)
+            else:
+                _pl["agedrop"] = _pl.get("agedrop", 0) + 1
+        if _pl["pair"] is not None and not _pair_slot_ok(cap, _pl["pair"]):
+            _pl["pair"] = None
+        # 重呈现只为一件事：没拍到新帧的那些刷新里把上一对再上一次，让光标和
+        # FPS 角标跟着刷新率走。深度复用时每一张采到的帧都会配上最新的深度
+        # 上屏，"有帧没深度"的情况不存在了，丢刷新的空档里补一次重呈现没有
+        # 画面上的好处，反而占一个翻转槽——显卡忙的时候下一张新帧正好要等
+        # 这个槽（2026-11-28 实测：两次上屏间隔 ≥60ms 的 58 次里，15 次是
+        # 新帧在等翻转槽，前面都紧挨着一次重呈现）。所以复用模式下只有画面
+        # 真的静止了（REP_IDLE_DT 没采到帧）才重呈现。
+        _due_rep = (_pl["last_pair"] is not None
+                    and t0 - globals().get("_present_t", 0.0) >= REPRESENT_DT
+                    and (not _reuse
+                         or t0 - _pl.get("cap_t", 0.0) >= REP_IDLE_DT))
+        _slot = (_flip_slot_free(t0)
+                 if (_pl["pair"] is not None or _due_rep) else 0)
+        _checked = (_slot == 1)       # 1=已确认有槽（信号已消费，提交时不再问）
+        _shown = False
+        if _pl["pair"] is not None and not _slot:
+            _pl["hold"] = True
+            _pl["hold_n"] = _pl.get("hold_n", 0) + 1
+        elif _pl["pair"] is not None:
+            _pr = _pl["pair"]
+            _held = _pl.pop("hold_n", 0)
+            if _reuse and not _pl["chained"] and _pr[5] > 0.0:
+                # 深度复用、这一拍没有新推理结果：用最近一次推理的原始深度
+                # 再走一步时域平滑（τ 按真实 dt）——平滑跟着显示帧走，新深度
+                # 到来时连续过渡。只在真要画的时候做（免得 hold 期间重复走）。
+                _a = (ema_alpha(float(_depth_mod.DEPTH_SMOOTHING_FRAMES),
+                                time.perf_counter())
+                      if str(getattr(_depth_mod, "DEPTH_SMOOTHING", "ema"))
+                      != "off" else 1.0)
+                _nd = window.post.ema_step(_a)
+                if _nd is not None:
+                    _pr = _pr[:1] + (_nd,) + _pr[2:]
+                    _pl["pair"] = _pr
+            _didx, _ddepth, _dseq, _dcseq, _ddseq, _dage = _pr
+            _pl["last_pair"] = _pr
             _pl["pair"] = None
             _src = cap["ring"][_didx]
+            # 这一帧的颜色留一份给显示用。环槽只被下面这次拷贝读，读完（消费
+            # 信号一执行）采集就能覆盖它；之后的重呈现读的是这份拷贝。
+            # 以前重呈现直接读环槽，每次都往渲染队列尾部再追加一个这个槽的
+            # 消费信号——采集要等它，而它排在推理、深度链后面（2026-11-28
+            # 实测 55% 的采集在等这个，p50 12~14ms）。
+            _disp = cap.get("disp")
+            if _disp is not None:
+                cap["bridge"].queue_wait(_dcseq)     # 等这一帧的采集拷贝落地
+                ren.begin_frame()
+                ren.copy_tex_to_tex(_disp, _src)
+                ren.submit()
+                _src = _disp
             window.attach_color(_src, *cap["zcc"].size)
             window.render(depth_tex=_ddepth, stats=_st)
             _pbb = ren.cur_bb()
-            _pok = window.present(nowait=True)
-            if _pl.get("probe"):
-                print(f"[pp] seq={_dseq} slot={_didx} bb={_pbb} "
-                      f"ok={1 if _pok else 0}", flush=True)
+            # 走到这里说明已经决定要画（_slot≠0），所以直接提交、不再问槽：
+            # _slot==1 时信号已在上面消费；==2 是 100ms 强制放行，宁可让
+            # Present 短暂阻塞也要把画面送出去（保证不会卡死在"永不触发"的配置里）
+            _pok = window.present(nowait=True, checked=True)
             _tp2 = time.perf_counter()
+            if _pl.get("probe"):
+                # 逐次上屏记录（诊断）：f=1 表示 100ms 强制放行；held=这一对等了
+                # 几拍才等到槽；lag=GPU 积压提交数；dwm=距这帧桌面呈现的 ms
+                try:
+                    _fq = (cap["zcc"].frame_qpc if _reuse
+                           else _pl["pair_qpc"].get(_dseq))
+                    _dwm = ((_zcc_mod.qpc() - _fq) * 1000.0 / _qpf) \
+                        if _fq else -1.0
+                except Exception:
+                    _dwm = -1.0
+                print(f"[pp] t={(_tp2 - _overlay_t0) * 1000.0:.1f} "
+                      f"seq={_dseq} slot={_didx} bb={_pbb} "
+                      f"ok={1 if _pok else 0} cseq={_dcseq} dseq={_ddseq} "
+                      f"dage={_dage:.0f}ms f={1 if _slot == 2 else 0} "
+                      f"held={_held} ch={1 if _pl['chained'] else 0} "
+                      f"lag={int(ren.last_fence() - ren.completed_fence())} "
+                      f"dwm={_dwm:.1f}", flush=True)
+            if _pl.get("outp"):
+                _out_probe(cap, 0, _dseq, _src, _ddepth)
             globals()["_present_t"] = _tp2
+            # 环槽的消费信号：上面的颜色拷贝读完它，采集就可以覆盖
             _signal_consumed(_didx)
+            # 这一对的槽还靠 avoid2 保护一阵（深度链算判据时要读它的颜色）；
+            # avoid 留给下一帧提交时用
+            cap["zcc"].avoid2 = _didx
             _pl["n"] += 1
             _pl["presents"] = _pl.get("presents", 0) + 1
+            if _dage > 0.0:
+                _lat_dage.append(_dage)
             # e2e：这一对的"桌面 present → 我们的 present 提交"
             try:
-                _q0 = _pl["pair_qpc"].get(_dseq)
+                _q0 = (cap["zcc"].frame_qpc if _reuse
+                       else _pl["pair_qpc"].get(_dseq))
                 if _q0:
                     _lv = (_zcc_mod.qpc() - _q0) * 1000.0 / _qpf
                     _lat_e2e.append(_lv)
@@ -2081,48 +2411,72 @@ def _main_d3d(mode="Viewer"):
                     _hb[3] += 1
                 else:
                     _hb[4] += 1
-        elif (_pl["last_pair"] is not None
-              and t0 - globals().get("_present_t", 0.0) >= REPRESENT_DT):
-            # 静态内容：按刷新率重呈上一对（光标/HUD 跟随）。这一对已经
-            # signal 过，不再重复 signal；用 avoid 钉住槽防止被采集覆盖。
-            _didx, _ddepth, _ = _pl["last_pair"]
-            cap["zcc"].avoid = _didx
-            window.attach_color(cap["ring"][_didx], *cap["zcc"].size)
+            _shown = True
+        elif _pl["last_pair"] is not None and _slot and cap.get("disp") is not None:
+            # 静态内容 / GPU 被拖慢：按刷新率重呈上一对（光标/HUD 跟随）。
+            # 读的是上屏时留下的颜色拷贝，不碰环槽：采集不用等重呈现，环槽
+            # 即使已经被新帧覆盖也没关系（这里【不能】动 avoid——它保护的是
+            # 在飞的那一帧）。
+            _didx = _pl["last_pair"][0]
+            _ddepth = _pl["last_pair"][1]
+            _disp = cap["disp"]
+            window.attach_color(_disp, *cap["zcc"].size)
             window.render(depth_tex=_ddepth, stats=_st)
-            window.present(nowait=True)
+            window.present(nowait=True, checked=True)
             globals()["_present_t"] = time.perf_counter()
-        # 3)【CPU 输出模式】新采集帧 → prep + 投递推理（不等待）。只在
-        #    worker 还忙时跳过（流水线级数决定的吞吐），不按时间节流。
-        if (not _pl_gpu) and idx >= 0 and _pl["tag"] is None:
-            _src = cap["ring"][idx]
-            # 桥协议 gate（见上：串行路径 1576 行同款；流水线曾漏）
-            cap["bridge"].queue_wait(cap["zcc"].bridge_seq)
+            _shown = True
+            if _pl.get("probe"):
+                print(f"[pp] t={(time.perf_counter() - _overlay_t0) * 1000.0:.1f} "
+                      f"REP slot={_didx} cseq={_pl['last_pair'][3]} "
+                      f"f={1 if _slot == 2 else 0}", flush=True)
+            if _pl.get("outp"):
+                _out_probe(cap, 1, _pl["last_pair"][2], _disp, _ddepth)
+        if not _shown and _checked:
+            # 问到了槽却没东西可画（只可能是上一对的槽刚被占用）：提交一个
+            # 空帧（内容=上一帧），别让一次性信号丢掉
             ren.begin_frame()
-            _src.state = _dr.ST_COMMON
-            _src.transition(_dr.ST_PIXEL_SRV)
-            window.prep.prep.state = _dr.ST_COMMON
-            window.prep.prep.transition(_dr.ST_RENDER_TARGET)
-            ren.draw_pass(window.prep._pso, [_src],
-                          window.prep.consts(),
-                          window.prep.prep, window.prep.prep_w,
-                          window.prep.prep_h)
-            window.prep.prep.state = _dr.ST_COMMON
-            ren.submit()
-            _o = cap["outs"][_pl["out_i"]]
-            _pl["out_i"] ^= 1
-            _pl["seq"] += 1
-            _tag = _pl["seq"]
-            cap["shim"].submit(_tag, _o.ctypes.data, _o.nbytes)
-            _pl["tag"] = (_tag, _o, idx)
-            cap["zcc"].avoid = idx
-            _did_work = True
-            _pl["caps"] = _pl.get("caps", 0) + 1
-            try:
-                _pl.setdefault("pair_qpc", {})[_tag] = cap["zcc"].frame_qpc
-                if len(_pl["pair_qpc"]) > 64:
-                    _pl["pair_qpc"].clear()
-            except Exception:
-                pass
+            window.present(nowait=True, checked=True)
+            globals()["_present_t"] = time.perf_counter()
+            if _pl.get("probe"):
+                print(f"[pp] t={(time.perf_counter() - _overlay_t0) * 1000.0:.1f} "
+                      f"EMPTY bb={ren.cur_bb()}", flush=True)
+        # 3)【CPU 输出模式】新采集帧 → prep → 投递推理（不等待）。
+        #    提交时机（gpu.dml_shim.infer_pick，门禁 d3d_entry_smoke D 段）：
+        #    不在采到帧的同一拍交。一次推理在 GPU 上是原子的：它一跑，桌面
+        #    合成、我们的显示、槽信号都得等它整段跑完；这一帧的拷贝还没落地
+        #    就开跑，会把它和这一帧的桌面合成一起挡住，攥帧超过 15ms 必丢一次
+        #    桌面刷新（2026-11-28 逐帧实测）。先记成"待提交"（槽由 avoid
+        #    保护），后面哪一拍拷贝落地了再交。
+        #    推理忙时不收新帧（流水线级数决定的吞吐）。严格配对：上一对还在
+        #    等翻转槽（hold）时不提交——avoid 得继续保护它。深度复用：被扣住
+        #    的就是这一帧自己，avoid 正好保护它，所以照样提交（否则被扣住的
+        #    帧永远进不了推理）。
+        if (not _pl_gpu) and not (_pl["hold"] and not _reuse):
+            _zc = cap["zcc"]
+            _new = ((idx, _zc.slot_seq[idx], _zc.frame_qpc)
+                    if idx >= 0 else None)
+            _pl["pend"], _pend, _fresh = _shim_mod.infer_pick(
+                _new, _pl["pend"], _pl["tag"] is not None, _zc.copy_pending)
+            if _fresh:
+                _zc.avoid = idx            # 等待期间这个槽不许被采集覆盖
+            if _pend is not None:
+                _pidx, _pseq, _pqpc = _pend
+                _src = cap["ring"][_pidx]
+                # 桥协议 gate（见上：串行路径 1576 行同款；流水线曾漏）
+                cap["bridge"].queue_wait(_pseq)
+                ren.begin_frame()
+                _src.state = _dr.ST_COMMON
+                _src.transition(_dr.ST_PIXEL_SRV)
+                window.prep.prep.state = _dr.ST_COMMON
+                window.prep.prep.transition(_dr.ST_RENDER_TARGET)
+                ren.draw_pass(window.prep._pso, [_src],
+                              window.prep.consts(),
+                              window.prep.prep, window.prep.prep_w,
+                              window.prep.prep_h)
+                window.prep.prep.state = _dr.ST_COMMON
+                ren.submit()
+                _infer_submit(_pl, _zc, cap["outs"], _pend, cap["shim"])
+                _did_work = True
         _st_inf.append(0.0)
         _st_anchor.append(0.0)
         _st_chain.append(0.0)
@@ -2211,11 +2565,20 @@ def _main_d3d(mode="Viewer"):
                 _vis = _want3d
                 if SAME_SCREEN:
                     if _want3d:
-                        window.show()
-                        window._reassert_overlay_style()
-                        window.keep_topmost()
-                        print("[Main] 3D 覆盖层显示", flush=True)
+                        # 本段 3D 不继承上一段的任何东西。2D 空档可能很长，
+                        # 上一段留在流水线里的推理结果 / 待显示对 / 待取读回
+                        # 都是那时的旧画面；交换链里也还残留着上一段最后一帧。
+                        # 所以这里只清状态，覆盖层等本段第一帧上屏后再显示
+                        # （_overlay_pending，见下方上屏处）。
+                        for _k in ("tag", "pair", "last_pair", "rb_v",
+                                   "last_depth", "pend"):
+                            _pl[_k] = None
+                        _pl.pop("cseq", None)     # 被丢弃的那次推理不再有对应
+                        _overlay_pending = True
+                        _overlay_t0 = time.perf_counter()
+                        _present_seq0 = window.present_seq
                     else:
+                        _overlay_pending = False
                         window.hide()
                         print("[Main] 2D 收回覆盖层", flush=True)
                         # 安全时刻：gen2 平时不自动触发，这里补一次全量回收
@@ -2315,11 +2678,24 @@ def _main_d3d(mode="Viewer"):
             if idx >= 0:
                 _prev_idx = idx
                 _pl["newf"] = _pl.get("newf", 0) + 1
-                # 告知采集：这个槽正在显示/会被重呈现反复采样，不要覆盖
-                # （内联 poll 会跳过 avoid；否则 GPU 采样中被拷新帧 = 一帧闪）
-                cap["zcc"].avoid = idx
-            elif _want3d and _switch_force and _prev_idx >= 0:
+                _pl["cap_t"] = time.perf_counter()   # 最近一次采到帧的时刻（重呈现的静止判据）
+                # 串行路径：这一帧马上被处理并显示，告知采集不要覆盖它
+                # （内联 poll 会跳过 avoid；否则 GPU 采样中被拷新帧 = 一帧闪）。
+                # 流水线路径【不在这里动 avoid】：保护位归"在飞的那一帧"
+                # 所有，由提交时设置（_tick_pipeline 第 3 步）。GPU 被拖慢时
+                # 新帧常在上一帧还在推理时到达（这时它不会被提交），若在这
+                # 里把 avoid 抢走，在飞帧的颜色槽就会被更新的画面覆盖——显示
+                # 出"未来"的一帧、下一对再跳回去。
+                if not _PL_ON:
+                    cap["zcc"].avoid = idx
+            elif (_want3d and _switch_force and _prev_idx >= 0
+                  and cap["zcc"].frame_unchanged()):
+                # 静态桌面：会话活着、只是没有新帧——环里上一帧就是当前桌面，
+                # 沿用它让 3D 立刻出画面。会话错误（ACCESS_LOST 等）/ 重建中
+                # 不沿用：那一帧可能是上一段 3D 的画面（等重建后的第一帧）。
+                # 沿用的不是新采集帧，不记端到端延迟。
                 idx = _prev_idx
+                cap["zcc"].frame_qpc = 0
             elif _PL_ON and _want3d:
                 # 流水线：没有新帧也要推进（链/显示/推理都在飞）
                 _tick_pipeline(-1)
@@ -2332,10 +2708,13 @@ def _main_d3d(mode="Viewer"):
                 # 闸门必须看【最近一次 present】（内容帧也算）：只看上次重呈现
                 # 会让每次内容帧后又补一次重呈现 → 实际 ~98 present/s（60Hz
                 # 屏），DWM 合成被自己的重复帧挤占，交付帧率反被拖到 47~51。
+                # 本段首帧上屏前不重呈现：此刻 color/depth 还是上一段 3D 的。
                 _pt = time.perf_counter()
+                # 没有翻转槽就不重呈现（原因见 _flip_slot_free）
                 if (window.post.depth is not None
+                        and not _overlay_pending
                         and _pt - globals().get("_present_t", 0.0)
-                        >= REPRESENT_DT):
+                        >= REPRESENT_DT and ren.wait_flip(0)):
                     globals()["_d3d_repr_t"] = _pt
                     _tr = time.perf_counter()
                     try:
@@ -2432,6 +2811,16 @@ def _main_d3d(mode="Viewer"):
                 globals()["_present_t"] = time.perf_counter()
                 _signal_consumed(idx)
 
+            # 覆盖层：本段第一帧已经提交上屏，现在才让它可见
+            if _overlay_pending and window.present_seq != _present_seq0:
+                _overlay_pending = False
+                window.show()
+                window._reassert_overlay_style()
+                window.keep_topmost()
+                print(f"[Main] 3D 覆盖层显示（本段首帧已上屏，入口后 "
+                      f"{(time.perf_counter() - _overlay_t0) * 1000.0:.0f}ms）",
+                      flush=True)
+
             # ---- 覆盖层维系（同屏 3D：topmost 每帧 / 样式 2s） ----
             if _want3d and SAME_SCREEN:
                 # GL 同款：每帧重申 HWND_TOPMOST。PotPlayer 等会在 topmost
@@ -2496,6 +2885,8 @@ def _main_d3d(mode="Viewer"):
                 _p = np.asarray(_proc, np.float32) if _proc else np.zeros(1)
                 _e = np.asarray(_lat_e2e, np.float32) if _lat_e2e \
                     else np.zeros(1)
+                # 深度复用：屏幕上深度比颜色晚多少（只在复用时记）
+                _da = np.asarray(_lat_dage, np.float32)
                 _c = np.asarray(_lat_cap, np.float32) if _lat_cap \
                     else np.zeros(1)
                 _si = np.asarray(_st_inf, np.float32) if _st_inf \
@@ -2516,6 +2907,10 @@ def _main_d3d(mode="Viewer"):
                 def _q(a, q):
                     return float(np.percentile(a, q))
 
+                _da_s = (" dage p50/p90/max=%.0f/%.0f/%.0fms agedrop=%d"
+                         % (_q(_da, 50), _q(_da, 90), float(_da.max()),
+                            _pl.get("agedrop", 0))) if _da.size else ""
+
                 print(f"[d3d] fps={_fps:.1f} dda_seq={cap['zcc'].bridge_seq} "
                       f"proc avg={float(_p.mean()):.1f} "
                       f"p50={_q(_p, 50):.1f} "
@@ -2534,17 +2929,21 @@ def _main_d3d(mode="Viewer"):
                       f"thr={cap['stats'].cut_thr:.2f} "
                       f"cut={cap['stats'].cut_flag:.0f} "
                       f"shim={cap['shim'].times6()}"
-                      f"{'' if not _PL_ON else (' pl(new=%d cap=%d chain=%d show=%d job=%.1fms)'
+                      f"{'' if not _PL_ON else (' pl(new=%d cap=%d chain=%d show=%d job=%.1fms slotmis=%d'
                        % (_pl.get('newf', 0) - _pl.get('newf0', 0),
                           _pl.get('caps', 0) - _pl.get('caps0', 0),
                           _pl.get('chains', 0) - _pl.get('chain0', 0),
                           _pl.get('presents', 0) - _pl.get('show0', 0),
-                          float(getattr(cap['shim'], 'last_job_ms', 0.0))))}",
+                          float(getattr(cap['shim'], 'last_job_ms', 0.0)),
+                          _pl.get('slotmis', 0) - _pl.get('mis0', 0)))}"
+                      f"{_da_s}{'' if not _PL_ON else ')'}",
                       flush=True)
                 _pl["newf0"] = _pl.get("newf", 0)
                 _pl["caps0"] = _pl.get("caps", 0)
                 _pl["chain0"] = _pl.get("chains", 0)
                 _pl["show0"] = _pl.get("presents", 0)
+                _pl["mis0"] = _pl.get("slotmis", 0)
+                _pl["agedrop"] = 0
                 # 阶段尾部分解 + 非每帧开销的窗口 max（卡顿归因用）
                 _wn = " ".join(f"{_k}={_v[0]:.1f}/{_v[1] / max(1, _v[2]):.2f}"
                                f"x{_v[2]}" for _k, _v in sorted(_win.items()))
@@ -2559,12 +2958,34 @@ def _main_d3d(mode="Viewer"):
                       f"| gap <18:{_hb[0]} 18-24:{_hb[1]} 24-34:{_hb[2]} "
                       f"34-60:{_hb[3]} >60:{_hb[4]} | max/avg(ms): {_wn}",
                       flush=True)
+                # 慢节（≥8ms）：主循环各个环节把循环卡住的次数与总时长；流水线
+                # tick 与 poll 直接从 deque 数。GPU 积压 = 已提交未执行的次数。
+                _slow = " ".join(f"{_k}={_v[3]}次/{_v[4]:.0f}ms"
+                                 for _k, _v in sorted(_win.items()) if _v[3])
+                _ps = _p[_p >= 8.0]
+                _pus = _pu[_pu >= 8.0]
+                _ln = max(1, _pl.get("lag_n", 0))
+                print(f"[d3d] 慢节(≥8ms): tick={int(_ps.size)}次/"
+                      f"{float(_ps.sum()):.0f}ms poll={int(_pus.size)}次/"
+                      f"{float(_pus.sum()):.0f}ms {_slow}| GPU积压: 最多 "
+                      f"{_pl.get('lag_max', 0)} 次提交未执行, 平均 "
+                      f"{_pl.get('lag_sum', 0) / _ln:.1f}（{_ln} 拍有积压）",
+                      flush=True)
+                _pl["lag_max"] = 0
+                _pl["lag_sum"] = 0
+                _pl["lag_n"] = 0
                 for _i in range(5):
                     _hb[_i] = 0
                 _e2e_over[0] = 0
                 _win.clear()
                 window.actual_fps = _fps
     finally:
+        try:
+            if _pl.get("_outf") is not None:
+                _pl["_outf"].close()
+                _pl["_outf"] = None
+        except Exception:
+            pass
         try:
             if _cap is not None:
                 _cap["zcc"].stop()

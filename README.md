@@ -14,7 +14,7 @@ Windows 10/11 · Direct3D 12 · DirectML。
 ## 能力
 
 - **输入**：整屏 DXGI Desktop Duplication（DDA），共享纹理；默认采集屏就是输出屏（同屏），也可分别指定「采集屏」与「输出屏」（AB 屏分离，适合 AR 眼镜）。
-- **深度**：单目深度模型 **ZipDepth Widescreen EdgePad（512×288，MIT，随仓库分发）**经 DirectML 推理；深度图经后处理链（每帧按 P2/P98 重标定 → 各向异性高斯 AA → 80 ms 时域 EMA；切换画面时按颜色直方图判切并重置 EMA）后用于 3D 合成。模型登记在 `D2S/model_catalog.py` 的 `LOCAL_MODELS`（文件 / 输入尺寸 / 预处理方式）；产品模型固定为 `zipw512`（`PRODUCT_MODEL`），设置面板不提供模型选择。
+- **深度**：单目深度模型 **ZipDepth Widescreen EdgePad（512×288，MIT，随仓库分发）**经 DirectML 推理；深度图经后处理链（每帧按 P2/P98 重标定 → 各向异性高斯 AA → 50 ms 时域 EMA；切换画面时按颜色直方图判切并重置 EMA）后用于 3D 合成。模型登记在 `D2S/model_catalog.py` 的 `LOCAL_MODELS`（文件 / 输入尺寸 / 预处理方式）；产品模型固定为 `zipw512`（`PRODUCT_MODEL`），设置面板不提供模型选择。
 - **输出格式**：
 
   | 格式 | 说明 |
@@ -99,7 +99,7 @@ GL 回退/工具额外需要 `moderngl glfw PyOpenGL PyOpenGL-accelerate`。见 
 
 ## 本仓工具
 
-- 门禁/冒烟：`tools/d3d_parity_test.py`、`d3d_dibr_parity.py`、`d3d_interleaved_parity.py`、`d3d_view_smoke.py`、`d3drender_smoke.py`、`dda_bridge_smoke.py`、`shim2_sanity.py`、`smoke.py`
+- 门禁/冒烟：`tools/d3d_parity_test.py`、`d3d_dibr_parity.py`、`d3d_interleaved_parity.py`、`d3d_view_smoke.py`、`d3drender_smoke.py`、`dda_bridge_smoke.py`、`d3d_entry_smoke.py`、`disp_copy_smoke.py`、`shim2_sanity.py`、`smoke.py`
 - 实时：`tools/d3d_live.py`（真实屏幕流 + `--gate` 门禁）
 - 端到端：`tools/e2e_d3d.py`、`e2e_d3d_live.py`、`e2e_playback.py`
 - 打包：`tools/make_release_d3d.py` + `tools/package_shim.py`（重编 pyc、同步 DLL、重编启动器）
@@ -114,6 +114,7 @@ GL 回退/工具额外需要 `moderngl glfw PyOpenGL PyOpenGL-accelerate`。见 
 - AR 眼镜的「3840×2160 渲染、眼镜纵向压回 3840×1080」用法需要显示端支持 2160p 输入；此时输出格式应选 `Half-SBS`。
 - `Depth Map` 是调试输出，显示的是 3D 渲染实际使用的最终深度图（已重标定与平滑）；暗色文字界面上会呈现大块色块，属正常现象。
 - 成对流水线（默认）下，若某次推理卡住，没有超时保护：3D 画面会停在最后一帧（FPS 归零），重启软件即可恢复。
+- 推理与其它程序共用显卡：游戏等占满显卡的程序运行时，转换帧率会明显下降；降低游戏画质或给游戏限帧可以缓解。
 - 环境变量开关见 `docs/env-flags.md`；排障日志在 `D2S/logs/`（不入库）。
 
 ## 许可证与致谢

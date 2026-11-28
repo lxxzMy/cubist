@@ -38,6 +38,7 @@ WS_EX_NOACTIVATE = 0x8000000
 WS_EX_TOOLWINDOW = 0x80
 WS_EX_APPWINDOW = 0x40000
 WS_EX_NOREDIRECTIONBITMAP = 0x00200000
+WS_EX_TOPMOST = 0x8
 WDA_EXCLUDEFROMCAPTURE = 0x11
 # D2S_DCOMP=1：DirectComposition 交换链（逐像素 alpha 的"正规版 254"）
 _DCOMP = os.environ.get("D2S_DCOMP") == "1"
@@ -139,6 +140,17 @@ _user32.SetWindowRgn.restype = ctypes.c_int
 _user32.SetWindowRgn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
 _user32.GetWindowRgn.restype = ctypes.c_int
 _user32.GetWindowRgn.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+# Z 序（keep_topmost 每帧走）。句柄是 64 位，同样在模块级声明一次；常量也
+# 建成对象复用，不在热路径里现造。
+_user32.SetWindowPos.restype = ctypes.c_int
+_user32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                 ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                 ctypes.c_int, ctypes.c_uint]
+_user32.GetWindowLongW.restype = ctypes.c_long
+_user32.GetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int]
+HWND_TOPMOST = ctypes.c_void_p(-1)
+HWND_NOTOPMOST = ctypes.c_void_p(-2)
+_SWP_KEEP = 0x0001 | 0x0002 | 0x0010    # NOSIZE|NOMOVE|NOACTIVATE
 
 
 def _set_opaque_hole(hwnd, w, h):
@@ -213,6 +225,8 @@ class D3DStereoWindow:
         self._texture_size = tuple(frame_size)
         self.actual_fps = 0.0
         self.total_latency = 0.0
+        self._topmost_retry_t = 0.0
+        self._topmost_fix_logged = False
 
         # 窗口尺寸/样式：SAME_SCREEN → 无边框全屏覆盖层（WS_POPUP，铺满
         # 被采集那块屏的原点）；否则普通窗口（带边框，客户区=frame_size）
@@ -285,6 +299,7 @@ class D3DStereoWindow:
             self.show()
 
         self.disp = dv.D3DDisplay(self.ren, self.hwnd, w, h, use_flip=True)
+        self.present_seq = 0       # 成功提交的 present 次数（见 present）
         self.disp.fill_16_9 = self.fill_16_9
         self.prep = D3DDepthPrep(self.ren, (self._res_w, self._res_h),
                                  normalize=self._prep_normalize)
@@ -460,9 +475,32 @@ class D3DStereoWindow:
             WDA_EXCLUDEFROMCAPTURE if on else 0)
         return bool(ok)
 
+    def is_topmost(self):
+        return bool(_user32.GetWindowLongW(self.hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)
+
     def keep_topmost(self):
-        _user32.SetWindowPos(ctypes.c_void_p(self.hwnd), ctypes.c_void_p(-1),
-                             0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)  # NOSIZE|NOMOVE|NOACTIVATE
+        """同屏 3D 每帧调用：重申 HWND_TOPMOST，并核对是否真的生效。
+
+        系统对这种带翻转交换链的全屏窗口会【静默忽略】置顶请求——调用
+        返回成功，WS_EX_TOPMOST 却不变，窗口就一直压在别的窗口下面，表现为
+        "切了 3D 但看不到"。实测触发条件：整屏矩形窗口；管理员权限的全屏
+        游戏在前台；以及此后一直卡住的状态（前台换了也不恢复）。此时先
+        显式取消置顶、再置顶就能生效。无效重试限 10 次/秒。
+        """
+        _user32.SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, _SWP_KEEP)
+        if self.is_topmost():
+            self._topmost_fix_logged = False
+            return
+        now = time.perf_counter()
+        if now - self._topmost_retry_t < 0.1:
+            return
+        self._topmost_retry_t = now
+        _user32.SetWindowPos(self.hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, _SWP_KEEP)
+        _user32.SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, _SWP_KEEP)
+        if self.is_topmost() and not self._topmost_fix_logged:
+            self._topmost_fix_logged = True
+            print("[view] 系统忽略了置顶请求，已用「取消置顶→置顶」恢复",
+                  flush=True)
 
     def position_on_monitor(self, monitor_index=0):
         if self._mon is not None:          # 同屏：严格铺满采集屏
@@ -651,12 +689,18 @@ class D3DStereoWindow:
             self.depth_map_stage = st
             print(f"[depth] Depth Map 阶段 → {st}", flush=True)
 
-    def present(self, nowait=False):
+    def present(self, nowait=False, checked=False):
         # D2S_SYNC1=1：不透明平面（alpha=255）时必须让翻转对齐 VBlank，
         # 否则 MPO 独立翻转会直扫 flip 缓冲 → 运动横缝。代价是 Present 等
-        # 一次合成；nowait 时若没槽就跳过（不阻塞）。
+        # 一次合成；nowait 时若没槽就跳过（不阻塞）。checked=True：调用方
+        # 已经问过有没有槽（waitable 是一次性信号，不能问第二次）。
         _sync = 1 if (_SYNC1 or self.vsync) else 0
-        return self.disp.present(_sync, nowait=nowait)
+        _ok = self.disp.present(_sync, nowait=nowait, checked=checked)
+        if _ok:
+            # 成功提交的 present 次数：主循环靠它判断"本段 3D 是否已上过屏"
+            # （覆盖层等首帧上屏后才显示）
+            self.present_seq += 1
+        return _ok
 
     def attach_color(self, tex, w=None, h=None):
         """绑定本帧色源（DDA 桥环纹理或 2D 上传纹理）。"""

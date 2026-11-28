@@ -2,8 +2,8 @@
 """DDA 采集桥（迁移 T1）：D3D11 DDA 环纹理 → D3D12 管线消费。
 
 producer 侧（dxgi_gpu_grab，D2S_RENDER=d3d 门控）：环纹理加
-MISC_SHARED_NTHANDLE|KEYEDMUTEX(0x800|0x100，D3D11 值)，拷贝前
-AcquireSync(0)/拷贝+Signal 后 ReleaseSync(0)，帧序号 ctx4.Signal。
+MISC_SHARED_NTHANDLE|KEYEDMUTEX(0x800|0x100，D3D11 值)，建环时对每个槽
+AcquireSync(0) 一次并一直持有，每帧只做 拷贝 + ctx4.Signal(帧序号)。
 consumer 侧（本模块）：D3D11 SHARED fence（0x2）创建 + CreateSharedHandle
 （槽 7）交给采集侧；D3D12 侧 OpenSharedHandle（槽 32）一次性缓存
 （逐帧重 open ~0.03ms/帧不可接受）；LUID 校验 fail-loud；queue.Wait
@@ -12,8 +12,10 @@ consumer 侧（本模块）：D3D11 SHARED fence（0x2）创建 + CreateSharedHa
 坑位背书（全部生产实锤，见 tools/d3d_microbench.py 探针 E 与
 docs/zero-copy-migration.md）：
 - D3D11/D3D12 枚举不同源：KM 0x100 vs 0x1000、fence SHARED 0x2 vs 0x1
-- IDXGIResource1::CreateSharedHandle = 槽 13（槽 8 是 GetSharedHandle）
-- KM 纹理不 AcquireSync 就写 = 拷贝被静默吞掉
+- IDXGIResource1::CreateSharedHandle = 槽 13（槽 7 是 GetSharedHandle）
+- KM 纹理不 AcquireSync 就写 = 拷贝被静默吞掉（每槽的第一次）；IDXGIKeyedMutex
+  的虚表槽位实测 7=GetSharedHandle、8=AcquireSync、9=ReleaseSync
+  （dxgi_gpu_grab.S_KEYED_*，2026-11-28 解跳板核对）
 - OpenSharedHandle 打开的资源用隐式状态提升，发显式屏障曾致 Close
   E_INVALIDARG（d3drender.wrap_external 的 no_barrier 语义）
 - D3D11/D3D12 设备必须同 LUID（跨卡共享句柄无效）
@@ -100,17 +102,23 @@ def dev11_luid(dev11):
 class DdaBridge:
     """DDA 环纹理的 D3D12 消费桥。
 
-    初始化（d3d 管线启动时）：
-        bridge = DdaBridge(ren)                # ren: d3drender.D3DRenderer
-        ring_misc = d3d_ring_misc()            # 交 DxgiGpuColor 建环
+    初始化（d3d 管线启动时；zcc = DxgiGpuColor，先 build_inline）：
+        # 【必须】把采集设备和它的 immediate context 传进来：
+        # producer_handles() 交出去的 ctx4 要发"拷贝完成"的 Signal、收"写槽前
+        # 等读完"的 Wait，而环纹理的拷贝在 zcc._ctx 上执行。让桥自建设备时
+        # 两者不在同一设备的队列里、没有先后保证 → 渲染队列会读到拷贝尚未落地
+        # 的旧内容（帧号在涨、画面往回跳，2026-11-28）。
+        bridge = DdaBridge(ren, dev11=zcc._dev, ctx11=zcc._ctx)
         f11, ctx4 = bridge.producer_handles()  # 交 DxgiGpuColor 每帧 signal
-        ring_texes = bridge.open_ring(ring_comptrs, w, h)   # 一次性 open
+        zcc.attach_bridge_fence(f11, ctx4, fcons11)   # 会核对 ctx4 是否同源
+        ring_texes = bridge.open_ring(zcc._ring, w, h)   # 一次性 open
     每帧消费：
         bridge.queue_wait(v)                   # 录命令前（GPU 端门控）
         ring_texes[idx] 采样（no_barrier Tex）
     生产端每帧拷贝协议（dxgi_gpu_grab d3d 模式）：
-        kms[idx].AcquireSync(0) → CopyResource → ctx4.Signal(f11, v)
-        → kms[idx].ReleaseSync(0)   （v 与 bridge._seq 对账由 glue 层持有）
+        CopyResource → ctx4.Signal(f11, v)
+        （v 与 bridge._seq 对账由 glue 层持有；环槽的带锁互斥体在建环时
+        各 AcquireSync(0) 一次并一直持有——不取锁的那次拷贝会被丢）
     """
 
     def __init__(self, ren, dev11=None, ctx11=None, adv=None):

@@ -396,8 +396,8 @@ class D3DDisplay:
         self.ren.wait()
         return out
 
-    def present(self, sync_interval=1, nowait=False):
-        return self.ren.present(sync_interval, nowait=nowait)
+    def present(self, sync_interval=1, nowait=False, checked=False):
+        return self.ren.present(sync_interval, nowait=nowait, checked=checked)
 
     # ---- 旧接口兼容（draw+present 一体化） -------------------------------
     def render(self, mode, color_tex=None, depth_tex=None):

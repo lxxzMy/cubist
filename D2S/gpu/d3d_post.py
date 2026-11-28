@@ -207,26 +207,7 @@ class D3DDepthPost:
         # 首帧 alpha=1.0 直通（GL _first / CPU _ema_first 同语义：ema 状态
         # 未播种时 mix(prev=0, cur, 0.19) 会把首帧压到 19%）
         if temporal == "ema":
-            dst = self.depth
-            self.ema.transition(ST_PIXEL_SRV)
-            dst.transition(ST_RENDER_TARGET)
-            if stats is not None:
-                pso = self._pso_for("ema_pp_stats", PP_STATS_FS)
-                self.ren.draw_pass(
-                    pso, [cur, self.ema],
-                    self._cb(res, alpha=a_eff),
-                    dst, res, self.res_h, stats=stats.stats)
-            else:
-                pso = self._pso_for("ema_pp", PP_FS)
-                self.ren.draw_pass(pso, [cur, self.ema],
-                                   self._cb(res, lo=0.0, hi=1.0, alpha=a_eff),
-                                   dst, res, self.res_h)
-            dst.transition(ST_COMMON)     # 真实 RT→COMMON 屏障（同帧回拷）
-            # EMA 状态 ← 输出：同列表紧接着录（单提交，省一次 fence 往返）
-            self.ren.copy_tex_to_tex(self.ema, self.depth)
-            # 收敛锚 = 最终显示深度（本帧 EMA 之后）的近峰中位
-            if stats is not None:
-                stats.anchor_from(self.depth)
+            self._ema_pass(cur, a_eff, stats)
             self._tail_submit()
         elif temporal == "median":
             ring = self.med_ring
@@ -260,6 +241,47 @@ class D3DDepthPost:
             raise ValueError(temporal)
         self._ema_first = False
         return self.depth
+
+    def _ema_pass(self, cur, a_eff, stats=None):
+        """时域 EMA 一步（不 submit，由 _tail_submit 收尾）：
+        depth ← mix(ema, cur, a_eff)，然后 ema ← depth。stats 给出时把判据
+        读回与收敛锚录进同一列表。"""
+        from .hlsl_depth import PP_FS, PP_STATS_FS
+        res = self.res_w
+        dst = self.depth
+        self.ema.transition(ST_PIXEL_SRV)
+        dst.transition(ST_RENDER_TARGET)
+        if stats is not None:
+            pso = self._pso_for("ema_pp_stats", PP_STATS_FS)
+            self.ren.draw_pass(
+                pso, [cur, self.ema],
+                self._cb(res, alpha=a_eff),
+                dst, res, self.res_h, stats=stats.stats)
+        else:
+            pso = self._pso_for("ema_pp", PP_FS)
+            self.ren.draw_pass(pso, [cur, self.ema],
+                               self._cb(res, lo=0.0, hi=1.0, alpha=a_eff),
+                               dst, res, self.res_h)
+        dst.transition(ST_COMMON)     # 真实 RT→COMMON 屏障（同帧回拷）
+        # EMA 状态 ← 输出：同列表紧接着录（单提交，省一次 fence 往返）
+        self.ren.copy_tex_to_tex(self.ema, self.depth)
+        # 收敛锚 = 最终显示深度（本帧 EMA 之后）的近峰中位
+        if stats is not None:
+            stats.anchor_from(self.depth)
+
+    def ema_step(self, alpha):
+        """深度复用：没有新推理结果的显示帧——用最近一次推理的 AA 后深度
+        （stage_aa）再走一步时域平滑，返回新的显示深度 Tex。这样平滑始终按
+        显示帧率进行（τ 按真实 dt，alpha 由调用方算），新深度到来时是连续
+        过渡而不是跳变。还没推理过（没有 stage_aa）返回 None。"""
+        cur = self.stage_aa
+        if cur is None:
+            return None
+        self.ren.begin_frame()
+        self._disp_i ^= 1
+        self._ema_pass(cur, float(alpha))
+        self._tail_submit()
+        return self.last_disp_depth
 
     def buf_to_tex(self, buf, dst_tex):
         """GPU 输出的推理结果（StructuredBuffer<float>）→ R32F 纹理。

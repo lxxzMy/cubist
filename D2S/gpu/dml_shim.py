@@ -79,6 +79,26 @@ def _res_wh(res):
     return int(res), int(res)
 
 
+def infer_pick(new, pend, busy, copy_pending):
+    """流水线第 3 步"把哪一帧送去推理"的决策（纯函数；门禁 tools/
+    d3d_entry_smoke.py D 段）。
+
+    new：这一拍新采到的帧（没有 = None）；pend：上一拍留下的待提交帧；
+    busy：推理还在飞。
+    返回 (新的待提交帧 | None, 这一拍要送去推理的帧 | None, 新帧是否刚成为待提交)。
+      · 忙的时候不收新帧（忙完了下一帧再来），也不提交；
+      · 收下的永远是最新的一帧（还在等的被新帧替换）；
+      · 这一帧的采集拷贝落地之后才提交（copy_pending 为假）：一次推理在
+        GPU 上是原子的，采到帧的同一拍就交，会把它自己的采集拷贝和这一帧
+        的桌面合成一起挡住，攥帧超过 15ms 就丢一次桌面刷新（2026-11-28）。
+    """
+    if new is not None and not busy:
+        return new, None, True
+    if pend is not None and not busy and not copy_pending:
+        return None, pend, False
+    return pend, None, False
+
+
 def open_shim2(ren, prep_tex, res, model_path=None):
     """shim v2 工厂（产品 D3D 主路径 + T3 测试壳共用）。
 

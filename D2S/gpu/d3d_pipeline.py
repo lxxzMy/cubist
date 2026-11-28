@@ -50,7 +50,10 @@ class D3DPipeline:
                 pass
         self.zcc = _zcc.DxgiGpuColor(_Q(), 0)
         self.zcc.build_inline(gl_ctx=None)   # 环已 NTHANDLE|KM（env 门控）
-        self.bridge = DdaBridge(self.ren)
+        # 桥建在采集设备上：Signal/Wait 必须与环纹理拷贝同在一个设备的
+        # 上下文里才有先后保证（自建设备时渲染队列会读到拷贝未落地的旧内容）
+        self.bridge = DdaBridge(self.ren, dev11=self.zcc._dev,
+                                ctx11=self.zcc._ctx)
         f11, ctx4 = self.bridge.producer_handles()
         self.zcc.attach_bridge_fence(f11, ctx4)
         self.ring_texes = self.bridge.open_ring(self.zcc._ring,

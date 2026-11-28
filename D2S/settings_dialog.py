@@ -695,10 +695,10 @@ class SettingsDialog(tk.Tk):
         self._vars["Convergence Tau"] = tk.DoubleVar(value=2.0)
 
         # 「画质」卡片已整块隐藏：里面的抗锯齿/平滑帧数都是产品定值，没有可调项。
-        # 抗锯齿 σ 是代码里定死的（utils.AA_KNOB，2026-11-24 用户定案 2；语义 =
+        # 抗锯齿 σ 是代码里定死的（utils.AA_KNOB，2026-11-28 用户定案 3；语义 =
         # 【两个方向里较大的 σ】，单位深度纹素，另一方向按每眼视口纵横比缩小，
         # 公式见 main._aa_sigma_texels），不读也不写 yaml。
-        # 深度 EMA 时间常数已定死 80ms（utils 常量），面板不再暴露
+        # 深度 EMA 时间常数已定死 50ms（utils 常量，2026-11-28 起），面板不再暴露
 
 
 
@@ -778,6 +778,8 @@ class SettingsDialog(tk.Tk):
         self._vars["Show FPS"] = tk.BooleanVar(value=False)
         r = self._row(c5, "显示帧率")
         _Switch(c5, self._vars["Show FPS"]).grid(row=r, column=1, sticky="e", padx=(12, 0))
+        # 深度复用已下线（2026-11-28 用户定案"效果太差"）：这里不再有开关，
+        # utils 也不读 yaml 的 "Depth Reuse"（旧配置残留的值不生效）。
         # 开机自启动：实际状态以启动文件夹里有没有我们的脚本为准
         self._vars["Auto Start"] = tk.BooleanVar(value=autostart_enabled())
         r = self._row(c5, "开机自启动")
@@ -791,6 +793,7 @@ class SettingsDialog(tk.Tk):
             "Edge Falloff": tk.BooleanVar(value=False),
             "VSync": tk.BooleanVar(value=False),
             "Capture Tool": tk.StringVar(value="DesktopDuplication"),
+            "Depth Max Age (ms)": tk.DoubleVar(value=250.0),
         })
 
         bar = tk.Frame(self, bg=BG)
